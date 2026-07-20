@@ -94,6 +94,13 @@ type Account struct {
 
 ไม่สร้าง prepared statements ไว้ล่วงหน้า แต่ให้ query เรียกฐานข้อมูลโดยตรงตามปกติ หากตั้งเป็น `true` จะมีขั้นตอนเตรียมและเก็บ statements สำหรับนำกลับมาใช้ซ้ำ
 
+- `false` เริ่ม application ง่าย ไม่ต้อง prepare และปิด statements เหมาะเมื่อ query ยังไม่มากหรือยังไม่พบปัญหาด้าน performance
+- `true` อาจช่วย query เดิมที่ถูกเรียกซ้ำจำนวนมาก และทำให้พบข้อผิดพลาดตอน prepare ตั้งแต่เริ่ม application
+- `true` มีต้นทุนตอนเริ่มระบบ ใช้ resource เพิ่ม และต้องจัดการ lifecycle เช่นเรียก `Close()`
+- prepared statements ไม่ได้รับประกันว่าจะเร็วกว่าเสมอ ควร benchmark ด้วย workload จริง
+
+โปรเจกต์นี้ใช้ `database/sql` และมี query ไม่มาก จึงคง `false` ไว้ก่อนได้ หากเปลี่ยนไปใช้ `pgx/v5` ตัว driver มี implicit prepared statement support อยู่แล้ว
+
 #### `emit_interface: false`
 
 ไม่สร้าง interface ที่รวม query methods หากตั้งเป็น `true` จะสร้าง interface เช่น `Querier` ซึ่งช่วยในการทำ mock, dependency injection และ unit test
@@ -102,6 +109,27 @@ type Account struct {
 type Querier interface {
     GetAccount(ctx context.Context, id int64) (Account, error)
     ListAccounts(ctx context.Context) ([]Account, error)
+}
+```
+
+ข้อดีเมื่อเปิดเป็น `true`:
+
+- ใช้ Dependency Injection ได้สะดวก
+- ส่ง mock หรือ fake เข้าไปทดสอบ business logic โดยไม่ต้องต่อฐานข้อมูลจริงได้
+- compiler ช่วยตรวจว่า implementation มี methods ครบ
+
+ข้อควรพิจารณา:
+
+- `Querier` จะรวม query methods ทั้งหมดและอาจใหญ่เกินความจำเป็นเมื่อระบบโตขึ้น
+- mock ที่ implement interface ทั้งก้อนต้องปรับตามเมื่อมี method ใหม่
+- transaction ที่รวมหลาย query อาจยังต้องมี `Store` interface ของ application เอง
+
+ถ้าแต่ละ service ใช้เพียงไม่กี่ query สามารถประกาศ interface ขนาดเล็กใกล้ผู้ใช้งานแทนได้:
+
+```go
+type AccountStore interface {
+    GetAccount(ctx context.Context, id int64) (Account, error)
+    CreateAccount(ctx context.Context, arg CreateAccountParams) (Account, error)
 }
 ```
 
@@ -207,6 +235,57 @@ account, err := queries.GetAccount(context.Background(), 1)
 คำสั่งนี้ไม่ได้สร้างฐานข้อมูลหรือตารางจริง ไม่ได้รัน migration ไม่ได้แก้ไขข้อมูล และไม่ได้เปิด database connection การนำ schema ไปใช้กับ PostgreSQL จริงยังต้องใช้ migration tool เช่น `golang-migrate`
 
 สรุป: `sqlc generate` แปลง schema และ SQL query ให้เป็น Go code แบบ type-safe ช่วยลด boilerplate และตรวจพบ query ที่ไม่สอดคล้องกับ schema ตั้งแต่ขั้นตอน generate
+
+## พื้นฐานภาษา Go ที่ใช้ในโปรเจกต์
+
+### Boilerplate คืออะไร
+
+Boilerplate คือโค้ดรูปแบบเดิมที่จำเป็นต้องเขียนซ้ำเพื่อให้ระบบทำงาน แต่ไม่ใช่ business logic หลัก เช่นการเรียก query, สร้างตัวแปรรับผลลัพธ์, `Scan` fields และส่งต่อ error
+
+`sqlc` ช่วยสร้าง boilerplate ของ database layer จาก SQL ทำให้เราเรียก method ที่ type-safe ได้โดยไม่ต้องเขียนโค้ดเดิมซ้ำทุก query
+
+### `int` และ `int64`
+
+- `int` มีขนาดตามสถาปัตยกรรมของเครื่อง เหมาะกับ index, `len()`, `cap()` และ loop
+- `int64` มีขนาด 64 บิตเสมอ เหมาะกับ PostgreSQL `BIGINT`, ID, balance และข้อมูลที่ต้องมีขนาดแน่นอน
+- แม้บนเครื่อง 64-bit ทั้งสองอาจมีขนาดเท่ากัน แต่ Go ถือว่าเป็นคนละ type
+
+```go
+var count int = 10
+var balance int64 = 100
+
+balance = int64(count) // ต้องแปลง type อย่างชัดเจน
+```
+
+การแปลง `int64` เป็น `int` ต้องระวังค่าสูงเกินช่วงของ `int` โดยเฉพาะบนระบบ 32-bit
+
+### Pointer
+
+Pointer คือตัวแปรที่เก็บที่อยู่ของตัวแปรอีกตัว:
+
+```go
+x := 10
+p := &x  // p มี type เป็น *int และเก็บที่อยู่ของ x
+*p = 20 // dereference แล้วแก้ x ผ่าน pointer
+```
+
+- `&x` ขอที่อยู่ของ `x`
+- `*int` หมายถึง type ที่เป็น pointer ไปยัง `int`
+- `*p` เข้าถึงค่าที่ `p` ชี้อยู่
+- pointer มีค่าเป็น `nil` ได้ และการ dereference `nil` จะทำให้ panic
+
+Go ส่ง argument แบบ copy เสมอ การส่ง pointer คือการ copy ที่อยู่ ทำให้ function เข้าถึงและแก้ข้อมูลต้นฉบับได้:
+
+```go
+func increase(n *int) {
+    (*n)++
+}
+
+x := 10
+increase(&x) // x กลายเป็น 11
+```
+
+Pointer receiver เช่น `func (q *Queries) ...` เหมาะเมื่อ method ต้องแก้ struct เดิม หลีกเลี่ยงการ copy struct หรือรักษาความสม่ำเสมอของ method set
 
 ## Method Receiver ของ Go เทียบกับ TypeScript
 
@@ -627,7 +706,7 @@ PASS
 
 ลำดับนี้ไม่ได้ขึ้นอยู่กับชื่อไฟล์หรือตำแหน่งของฟังก์ชัน แต่เกิดจากกฎของ package `testing` ที่กำหนดให้ `TestMain` เป็น entry point พิเศษของการทดสอบทั้ง package
 
-## `Int63n` และ `Int64N` สำหรับการสุ่มตัวเลข
+## การสุ่มตัวเลขด้วย `math/rand`
 
 ชื่อฟังก์ชันที่ใช้ขึ้นอยู่กับ package ที่ import
 
@@ -674,6 +753,19 @@ value := rand.Int64N(10)
 | `math/rand` | `Int63n(10)` | `int64` | `0` ถึง `9` |
 | `math/rand/v2` | `Int64N(10)` | `int64` | `0` ถึง `9` |
 
+สำหรับโปรเจกต์ใหม่ที่ใช้ Go 1.22 ขึ้นไป แนะนำ `math/rand/v2` ส่วน `math/rand` เหมาะกับการดูแลโค้ดเดิม ทั้งสอง package เป็น pseudo-random และไม่เหมาะกับ password, token หรือ secret ซึ่งควรใช้ `crypto/rand`
+
+`math/rand/v2` ไม่มี `Intn()` แบบ package เดิม แต่ใช้ `IntN()` โดย `N` เป็นตัวพิมพ์ใหญ่:
+
+```go
+index := rand.IntN(10)     // รับและคืนค่า int
+amount := rand.Int64N(10) // รับและคืนค่า int64
+```
+
+- `IntN` เหมาะกับ index และค่าจาก `len()` ซึ่งเป็น `int`
+- `Int64N` เหมาะกับ ID, balance หรือ PostgreSQL `BIGINT` ซึ่งเป็น `int64`
+- ทั้งคู่สุ่มในช่วง `[0, n)` และ panic เมื่อ `n <= 0`
+
 ### การสุ่มค่าตั้งแต่ `min` ถึง `max`
 
 สำหรับ `math/rand`:
@@ -699,6 +791,22 @@ max - min + 1 = 6
 สุ่มค่า 0 ถึง 5
 บวก min คือ 5
 ผลลัพธ์จึงเป็น 5 ถึง 10
+```
+
+หาก `min = 1` และ `max = 10`:
+
+```text
+max - min + 1 = 10
+rand.Int64N(10) สุ่มได้ 0 ถึง 9
+นำผลที่สุ่มได้ไปบวก min จึงได้ 1 ถึง 10
+```
+
+เลข `10` ที่ส่งเข้า `Int64N` คือจำนวนค่าที่เป็นไปได้ ไม่ใช่ผลลัพธ์ที่จะนำไปบวกกับ `min`
+
+สูตรเดียวกันรองรับช่วงติดลบ เช่น `min = -5`, `max = 5` จะสุ่มได้ตั้งแต่ `-5` ถึง `5` รวมขอบทั้งสองด้าน หากต้องการค่าติดลบเสมอตั้งแต่ `-1` ถึง `-10` ใช้:
+
+```go
+n := -(rand.IntN(10) + 1)
 ```
 
 ต้องมี `+1` เพราะ `Int63n` และ `Int64N` ไม่รวมขอบบน หากไม่มี `+1` จะสุ่มได้เพียง `5` ถึง `9`
@@ -733,6 +841,66 @@ ok   github.com/MumAroi/go-simplebank/db/sqlc
 ```
 
 ค่า coverage หมายถึงสัดส่วน statements ที่ tests รันผ่าน ไม่ได้ยืนยันว่าโปรแกรมถูกต้องตามเปอร์เซ็นต์นั้น
+
+`PASS` กับ coverage วัดคนละเรื่อง:
+
+- `PASS` หมายถึง test cases ที่รันไม่มี assertion ล้มเหลวหรือ panic
+- coverage `72.5%` หมายถึง test วิ่งผ่านประมาณ 72.5% ของ statements ที่นำมาวัด
+- methods หรือ branches ที่ไม่มี test เรียกยังลด coverage ได้ แม้ tests ที่มีอยู่จะผ่านทั้งหมด
+
+ดังนั้น coverage สูงไม่ได้รับประกันว่า test ดี เพราะ test อาจเรียก statement โดยไม่ได้ตรวจผลลัพธ์สำคัญ ควรมี assertions ตรวจทั้ง error และค่าที่คืนมา
+
+### Unit Test เทียบกับ Integration Test
+
+Unit test และ integration test ตรวจคนละส่วนของระบบ จึงควรเลือก implementation ให้ตรงกับสิ่งที่ต้องการทดสอบ
+
+#### Unit Test ใช้ Fake หรือ Mock
+
+Unit test ของ service ควรทดสอบ business logic โดยแยกออกจาก PostgreSQL จึง inject fake หรือ mock ที่ implement interface เดียวกับ store จริง:
+
+```go
+fake := &FakeStore{
+    account: Account{ID: 1, Owner: "Tom"},
+}
+
+service := NewAccountService(fake)
+account, err := service.GetAccount(context.Background(), 1)
+```
+
+การทดสอบนี้เหมาะสำหรับตรวจว่า service ส่ง parameter ถูกต้อง จัดการผลลัพธ์หรือ error ถูกต้อง และบังคับ business rules ถูกต้อง โดยไม่ตรวจ SQL หรือการเชื่อมต่อฐานข้อมูล
+
+#### Integration Test ใช้ Database จริง
+
+หากต้องการตรวจว่า SQL, parameter, การ `Scan` และ PostgreSQL ทำงานร่วมกันถูกต้อง ให้เรียก generated query จริงกับ test database:
+
+```go
+func TestGetAccount(t *testing.T) {
+    created := createRandomAccount(t)
+
+    account, err := testQueries.GetAccount(
+        context.Background(),
+        created.ID,
+    )
+
+    require.NoError(t, err)
+    require.Equal(t, created.ID, account.ID)
+    require.Equal(t, created.Owner, account.Owner)
+}
+```
+
+รูปแบบนี้เป็น integration test เพราะทดสอบการทำงานร่วมกันหลายส่วน ต้องเปิด PostgreSQL, apply migrations และจัดการ test data จึงช้ากว่าและพึ่งพา environment มากกว่า unit test
+
+```text
+AccountService ── unit test ด้วย FakeStore
+       │
+       ▼
+AccountStore interface
+       │
+       ▼
+sqlc Queries ─── integration test ด้วย PostgreSQL จริง
+```
+
+ถ้า service แค่ส่งต่อไปยัง store โดยไม่มี business logic unit test อาจให้ประโยชน์ไม่มาก แต่เมื่อมี validation, authorization หรือการแปลง error ควรมี unit tests สำหรับแต่ละกรณี ส่วน database query ควรมี integration test แยกต่างหาก ระบบหนึ่งจึงสามารถและมักควรมีทั้งสองแบบ
 
 หาก package ไม่มีไฟล์ test จะแสดงประมาณนี้:
 
@@ -838,6 +1006,47 @@ func New(db DBTX) *Queries {
 queries := New(conn)
 ```
 
+#### สร้าง Struct โดยตรงเทียบกับใช้ `New`
+
+สองรูปแบบนี้ให้ผลลัพธ์พื้นฐานเหมือนกัน คือได้ `*Queries` ที่มี `conn` เก็บอยู่ใน field `db`:
+
+```go
+// สร้างด้วย struct literal โดยตรง
+queries := &Queries{db: conn}
+
+// สร้างผ่าน constructor function
+func New(db DBTX) *Queries {
+    return &Queries{db: db}
+}
+
+queries := New(conn)
+```
+
+การสร้างโดยตรงมีข้อดีคือสั้นและมองเห็นทันทีว่ากำหนด field ใด เหมาะกับ struct ธรรมดาที่ไม่มี validation หรือขั้นตอน setup และใช้งานภายใน package เดียวกัน แต่ผู้เรียกต้องรู้โครงสร้างภายใน และถ้าวิธีสร้างเปลี่ยนก็อาจต้องแก้ทุกจุดที่สร้าง struct
+
+การสร้างผ่าน `New` มีข้อดีดังนี้:
+
+- ซ่อนรายละเอียดภายใน ผู้เรียกไม่ต้องรู้ว่า dependency ถูกเก็บใน field ชื่ออะไร
+- รวม validation, default values และขั้นตอน setup ไว้ในที่เดียว
+- เปลี่ยนโครงสร้างภายในภายหลังได้โดยไม่ต้องแก้โค้ดผู้เรียก
+- package อื่นเรียกใช้ได้ แม้ struct จะมี unexported fields
+
+ข้อเสียคือเพิ่ม function อีกชั้น และอาจดูเกินความจำเป็นสำหรับ struct ข้อมูลธรรมดาที่ไม่มีข้อกำหนดในการสร้าง
+
+ในกรณี `Queries` field `db` ขึ้นต้นด้วยตัวพิมพ์เล็ก จึงเป็น unexported และเข้าถึงได้เฉพาะ package เดียวกัน โค้ดใน package อื่นจึงทำแบบนี้ไม่ได้:
+
+```go
+queries := &db.Queries{db: conn} // compile error: เข้าถึง db ไม่ได้
+```
+
+แต่สามารถใช้ API ที่ `sqlc` เตรียมไว้ได้:
+
+```go
+queries := db.New(conn)
+```
+
+ดังนั้น `Queries` ควรสร้างผ่าน `New` ส่วน struct ที่เป็นข้อมูลธรรมดาและเปิด fields ให้กำหนดโดยตั้งใจ สามารถใช้ struct literal โดยตรงได้
+
 ### Interface
 
 `interface` กำหนดชุดความสามารถหรือ methods ที่ค่าชนิดหนึ่งต้องมี โดยไม่ได้กำหนด implementation:
@@ -851,6 +1060,24 @@ type DBTX interface {
 ```
 
 Go ใช้ implicit interface implementation หากชนิดใดมี methods ครบ ก็ถือว่า implement interface โดยอัตโนมัติ ไม่ต้องเขียน `implements`
+
+คำว่า implement หมายถึงการทำตามข้อกำหนดของ interface ครบทั้งชื่อ method, parameters และ return values ตัวอย่าง:
+
+```go
+type Speaker interface {
+    Speak() string
+}
+
+type Dog struct{}
+
+func (Dog) Speak() string {
+    return "Woof!"
+}
+
+var speaker Speaker = Dog{} // Dog implement Speaker โดยอัตโนมัติ
+```
+
+ถ้า method ขาดหรือ signature ไม่ตรงจะ compile ไม่ผ่าน นี่เรียกว่า implicit เพราะ `Dog` ไม่ต้องประกาศ `implements Speaker` เอง
 
 ตัวอย่าง `*sql.DB` และ `*sql.Tx` มี database methods ครบ จึงส่งเป็น `DBTX` ได้:
 
@@ -916,7 +1143,13 @@ type AccountService struct {
 func NewAccountService(store AccountStore) *AccountService {
     return &AccountService{store: store}
 }
+
+func (s *AccountService) GetAccount(ctx context.Context, id int64) (Account, error) {
+    return s.store.GetAccount(ctx, id)
+}
 ```
+
+Interface ถูกใช้งานตรง type ของ field และ parameter คือ `store AccountStore` ส่วนจุดที่เรียก method ผ่าน interface คือ `s.store.GetAccount(ctx, id)` Logic ภายใน store แต่ละตัวไม่จำเป็นต้องเหมือนกัน ขอเพียง method signature ตรงตาม contract ของ `AccountStore`
 
 ตอนใช้งานจริงสามารถ inject PostgreSQL store:
 
@@ -939,6 +1172,8 @@ fake := &FakeStore{account: Account{ID: 1, Owner: "Tom"}}
 service := NewAccountService(fake)
 ```
 
+`*FakeStore` อ่านค่าที่เตรียมไว้ใน memory ส่วน PostgreSQL store อ่านจากฐานข้อมูลจริง แม้ logic ภายในต่างกัน ทั้งคู่ใช้เป็น `AccountStore` ได้เพราะมี `GetAccount(context.Context, int64) (Account, error)` ตรงกัน
+
 DI ไม่ได้บังคับว่าต้องใช้ interface แต่ interface ทำให้สลับ implementation และเขียน unit tests ได้ง่ายขึ้น
 
 ### Context
@@ -949,6 +1184,26 @@ DI ไม่ได้บังคับว่าต้องใช้ interface 
 - กำหนด timeout
 - กำหนด deadline
 - ส่งข้อมูลที่ผูกกับ request เช่น request ID
+
+นิยามแบบสั้นคือ Context เป็นค่าที่ใช้ส่ง deadline, cancellation signal และข้อมูลเฉพาะ request ข้ามขอบเขตของ function หรือ API เพื่อให้งานในแต่ละชั้นหยุดหรือหมดอายุไปพร้อมกับงานต้นทาง
+
+`context.Context` เป็น interface ที่มี methods หลักดังนี้:
+
+```go
+type Context interface {
+    Deadline() (deadline time.Time, ok bool)
+    Done() <-chan struct{}
+    Err() error
+    Value(key any) any
+}
+```
+
+- `Deadline()` บอกเวลาที่งานต้องสิ้นสุด หากมีการกำหนดไว้
+- `Done()` คืน channel ที่ถูกปิดเมื่อ context ถูกยกเลิกหรือหมดเวลา
+- `Err()` บอกสาเหตุ เช่น `context.Canceled` หรือ `context.DeadlineExceeded`
+- `Value()` อ่านข้อมูลเฉพาะ request จาก key
+
+โดยทั่วไปไม่ต้อง implement interface นี้เอง แต่สร้างและต่อยอด context ด้วย functions ใน package `context`
 
 Context มักถูกส่งเป็น parameter ตัวแรก:
 
@@ -996,16 +1251,85 @@ account, err := queries.GetAccount(ctx, accountID)
 
 หาก query ใช้เวลาเกิน 2 วินาที context จะหมดเวลาและคืน error เช่น `context deadline exceeded` ควรเรียก `cancel()` เสมอเพื่อคืนทรัพยากร แม้งานจะเสร็จก่อน timeout
 
+#### Deadline
+
+`WithDeadline` กำหนดเวลาสิ้นสุดแบบเจาะจง ต่างจาก `WithTimeout` ที่กำหนดระยะเวลาสูงสุดนับจากปัจจุบัน:
+
+```go
+deadline := time.Now().Add(2 * time.Second)
+ctx, cancel := context.WithDeadline(context.Background(), deadline)
+defer cancel()
+```
+
 #### Cancellation
+
+Context Cancellation คือการส่งสัญญาณให้งานที่กำลังทำอยู่ทราบว่าควรหยุด ไม่ได้บังคับฆ่า function หรือ goroutine ทันที งานหรือ library ที่รับ context ต้องร่วมมือโดยตรวจ `ctx.Done()` หรือรองรับ context ภายใน API ของตนเอง
 
 ```go
 ctx, cancel := context.WithCancel(context.Background())
+defer cancel()
 
 go doWork(ctx)
 cancel()
 ```
 
-ภายในงานสามารถรอสัญญาณยกเลิกผ่าน `ctx.Done()` และตรวจสาเหตุผ่าน `ctx.Err()`
+- `ctx` ถูกส่งต่อไปยังงานที่ต้องการควบคุม
+- `cancel()` ปิด channel ที่คืนจาก `ctx.Done()` เพื่อส่งสัญญาณยกเลิก
+- หลังจากเรียก `cancel()` ค่า `ctx.Err()` จะเป็น `context.Canceled`
+- ควรเรียก `cancel()` เสมอเมื่อสร้าง cancellable context เพื่อคืนทรัพยากร แม้งานจะเสร็จแล้ว
+
+ภายในงานสามารถรอสัญญาณยกเลิกควบคู่กับผลลัพธ์ผ่าน `select`:
+
+```go
+func waitForResult(ctx context.Context, resultCh <-chan string) (string, error) {
+    select {
+    case <-ctx.Done():
+        return "", ctx.Err()
+    case result := <-resultCh:
+        return result, nil
+    }
+}
+```
+
+หาก function ไม่ตรวจ `ctx.Done()` และไม่ส่ง context ให้ API ที่รองรับ การเรียก `cancel()` จะไม่ทำให้ function นั้นหยุดเอง เช่น `time.Sleep` จะยังรอจนครบเวลา
+
+สำหรับ database ไม่ต้องเขียน `select` เอง เพราะใช้ API ที่รองรับ context ได้โดยตรง:
+
+```go
+row := db.QueryRowContext(ctx, query, id)
+```
+
+เมื่อ HTTP client ยกเลิก request สัญญาณจาก `r.Context()` สามารถไหลผ่าน handler, service และ store ไปถึง database driver เพื่อให้ driver พยายามหยุด query ที่ไม่จำเป็น
+
+Cancellation ยังส่งจาก parent ลงไปยัง child context:
+
+```go
+parent, cancelParent := context.WithCancel(context.Background())
+child, cancelChild := context.WithTimeout(parent, 5*time.Second)
+
+defer cancelParent()
+defer cancelChild()
+```
+
+- ยกเลิก `parent` จะยกเลิก `child` ด้วย
+- ยกเลิก `child` จะไม่ยกเลิก `parent`
+
+ดังนั้น cancellation เป็นกลไกแบบ cooperative: ผู้ส่งแจ้งว่าควรหยุด ส่วนงานผู้รับต้องฟังสัญญาณและจบการทำงานอย่างเหมาะสม
+
+#### Context Value
+
+`WithValue` เหมาะสำหรับ metadata ที่เดินทางไปกับ request เช่น request ID, trace ID หรือข้อมูล authentication:
+
+```go
+type contextKey string
+
+const requestIDKey contextKey = "request-id"
+
+ctx := context.WithValue(parent, requestIDKey, "req-123")
+requestID, ok := ctx.Value(requestIDKey).(string)
+```
+
+ควรสร้าง key type เฉพาะเพื่อลดโอกาสชนกับ key จาก package อื่น และไม่ควรใช้ Context แทน parameters ของ business logic เช่น `accountID` ควรส่งตรงผ่าน `GetAccount(ctx, accountID)`
 
 #### แนวทางการใช้ Context
 
@@ -1013,6 +1337,7 @@ cancel()
 - ส่ง context เดิมต่อไปยังชั้นล่าง
 - ใน HTTP handler ให้ใช้ `r.Context()` แทนการสร้าง `Background()` ใหม่
 - อย่าส่ง `nil`; หากไม่มี context ให้ใช้ `context.Background()`
+- โดยทั่วไปไม่ควรเก็บ context ไว้ใน struct แต่ให้รับเข้ามาในแต่ละ operation
 - ไม่ควรใช้ context เก็บ database connection, config หรือ optional parameters
 - ใช้ `WithValue` เฉพาะข้อมูลที่ผูกกับ request เช่น request ID หรือ trace ID
 

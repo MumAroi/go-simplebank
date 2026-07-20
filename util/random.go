@@ -1,14 +1,14 @@
 package util
 
 import (
-	"math/rand"
+	"math/rand/v2"
 	"strings"
 )
 
 const alphabet = "abcdefghijklmnopqrstuvwxyz"
 
 func RandomInt(min, max int64) int64 {
-	return min + rand.Int63n(max-min+1)
+	return min + rand.Int64N(max-min+1)
 }
 
 func RandomString(n int) string {
@@ -16,7 +16,7 @@ func RandomString(n int) string {
 	k := len(alphabet)
 
 	for range n {
-		c := alphabet[rand.Intn(k)]
+		c := alphabet[rand.IntN(k)]
 		sb.WriteByte(c)
 	}
 
@@ -35,5 +35,5 @@ func RandomMoney() int64 {
 func RandomCurrency() string {
 	currencies := []string{"USD", "EUR", "CAD"}
 	n := len(currencies)
-	return currencies[rand.Intn(n)]
+	return currencies[rand.IntN(n)]
 }
