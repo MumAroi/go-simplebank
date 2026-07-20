@@ -15,21 +15,23 @@ const (
 )
 
 var testQueries *Queries
+var testDB *sql.DB
 
 func TestMain(m *testing.M) {
-	conn, err := sql.Open(dbDriver, dbSource)
+	var err error
+	testDB, err = sql.Open(dbDriver, dbSource)
 	if err != nil {
 		log.Fatal("can not connect to db:", err)
 	}
 
-	if err := conn.Ping(); err != nil {
+	if err = testDB.Ping(); err != nil {
 		log.Fatal("can not ping db:", err)
 	}
 
-	testQueries = New(conn)
+	testQueries = New(testDB)
 
 	code := m.Run()
-	conn.Close()
+	testDB.Close()
 
 	os.Exit(code)
 }

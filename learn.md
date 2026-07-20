@@ -45,6 +45,223 @@ DROP TABLE accounts;
 
 สรุป: คำสั่งนี้สร้าง migration ชื่อ `init_schema` พร้อมไฟล์สำหรับดำเนินการเปลี่ยนแปลง (`up`) และย้อนกลับการเปลี่ยนแปลง (`down`)
 
+## Database Transaction และ ACID
+
+Transaction คือการรวม SQL operations หลายรายการให้เป็นงานหนึ่งชุด โดยต้องสำเร็จทั้งหมดหรือยกเลิกทั้งหมด
+
+ตัวอย่างการโอนเงินจากบัญชี A ไปบัญชี B ประกอบด้วยหลาย operation:
+
+```text
+1. สร้างรายการโอน
+2. หักเงินจากบัญชี A
+3. เพิ่มเงินให้บัญชี B
+4. บันทึกรายการเงินออกและเงินเข้า
+```
+
+ถ้าหักเงินจาก A สำเร็จ แต่เพิ่มเงินให้ B ล้มเหลว ระบบต้องย้อนการเปลี่ยนแปลงทั้งหมด ไม่เช่นนั้นข้อมูลจะอยู่ในสถานะไม่สมบูรณ์
+
+รูปแบบ SQL พื้นฐาน:
+
+```sql
+BEGIN;
+
+UPDATE accounts
+SET balance = balance - 100
+WHERE id = 1;
+
+UPDATE accounts
+SET balance = balance + 100
+WHERE id = 2;
+
+COMMIT;
+```
+
+- `BEGIN` เริ่ม transaction
+- `COMMIT` ยืนยันการเปลี่ยนแปลงทั้งหมด
+- `ROLLBACK` ย้อนการเปลี่ยนแปลงทั้งหมดใน transaction
+
+หาก operation ใดล้มเหลว application ควรสั่ง:
+
+```sql
+ROLLBACK;
+```
+
+### ACID Properties
+
+ACID คือคุณสมบัติสี่ข้อที่ช่วยให้ transaction เชื่อถือได้
+
+#### Atomicity — สำเร็จทั้งหมดหรือไม่เกิดขึ้นเลย
+
+ทุก operation ใน transaction ถูกมองเป็นหน่วยเดียว:
+
+```text
+หัก A สำเร็จ + เพิ่ม B สำเร็จ  ──> COMMIT
+หัก A สำเร็จ + เพิ่ม B ล้มเหลว ──> ROLLBACK ทั้งหมด
+```
+
+จึงไม่ควรเกิดสถานะที่บัญชีต้นทางถูกหักเงิน แต่บัญชีปลายทางไม่ได้รับเงิน
+
+#### Consistency — ข้อมูลยังรักษากฎของระบบ
+
+ก่อนและหลัง transaction ข้อมูลต้องอยู่ในสถานะที่ถูกต้องตาม database constraints และ business rules ที่ application บังคับใช้ เช่น:
+
+- Primary Key ต้องไม่ซ้ำ
+- Foreign Key ต้องอ้างถึงข้อมูลที่มีอยู่
+- ค่า currency ต้องอยู่ในชุดที่ระบบรองรับ
+- เงินรวมก่อนและหลังการโอนควรเท่าเดิม
+- หากไม่อนุญาตยอดติดลบ balance ต้องไม่น้อยกว่า `0`
+
+กฎบางส่วนควรบังคับด้วย constraint ในฐานข้อมูล:
+
+```sql
+balance BIGINT NOT NULL CHECK (balance >= 0)
+```
+
+ฐานข้อมูลรับประกัน constraints ที่ประกาศไว้ แต่ business rules ที่ไม่ได้เขียนเป็น constraint ยังเป็นความรับผิดชอบของ application
+
+#### Isolation — Transactions ที่ทำพร้อมกันไม่รบกวนกันอย่างผิดพลาด
+
+หากสอง transactions อ่านและแก้ไขบัญชีเดียวกันพร้อมกัน อาจเกิดปัญหา เช่น lost update หรือใช้เงินเกินยอด ฐานข้อมูลจึงใช้ snapshot, isolation level และ locking เพื่อควบคุม concurrency
+
+ตัวอย่างล็อกแถวก่อนแก้ไข:
+
+```sql
+SELECT *
+FROM accounts
+WHERE id = $1
+FOR UPDATE;
+```
+
+Isolation levels หลักของ PostgreSQL:
+
+- `Read Committed` เป็นค่าเริ่มต้น แต่ละ statement เห็นเฉพาะข้อมูลที่ commit แล้วก่อน statement นั้นเริ่ม
+- `Repeatable Read` transaction อ่านจาก snapshot เดิมตลอด transaction
+- `Serializable` เข้มงวดที่สุด ให้ผลเสมือน transactions ทำทีละรายการ แต่อาจเกิด serialization failure และ application ต้อง retry
+
+Isolation level ที่เข้มงวดขึ้นช่วยลด concurrency anomalies แต่มีต้นทุนด้าน locking, retry หรือ throughput จึงควรเลือกตามความต้องการของงาน
+
+#### Durability — Commit แล้วข้อมูลต้องคงอยู่
+
+เมื่อฐานข้อมูลยืนยันว่า `COMMIT` สำเร็จ ข้อมูลต้องคงอยู่แม้ server crash หรือ restart PostgreSQL ใช้กลไก Write-Ahead Log (WAL) เพื่อช่วยกู้คืนข้อมูลที่ commit แล้ว
+
+### Transaction ใน Go
+
+รูปแบบพื้นฐานด้วย `database/sql`:
+
+```go
+func execTx(
+    ctx context.Context,
+    db *sql.DB,
+    fn func(*Queries) error,
+) error {
+    tx, err := db.BeginTx(ctx, nil)
+    if err != nil {
+        return err
+    }
+
+    queries := New(tx)
+
+    if err := fn(queries); err != nil {
+        if rollbackErr := tx.Rollback(); rollbackErr != nil {
+            return fmt.Errorf(
+                "transaction error: %v, rollback error: %v",
+                err,
+                rollbackErr,
+            )
+        }
+        return err
+    }
+
+    return tx.Commit()
+}
+```
+
+ลำดับการทำงาน:
+
+```text
+BeginTx
+   │
+   ▼
+ทำ operations ผ่าน Queries
+   │
+   ├── มี error ──> Rollback
+   │
+   └── สำเร็จ ────> Commit
+```
+
+`New(tx)` ใช้งานได้เพราะ `*sql.Tx` มี methods ครบตาม interface `DBTX` เช่นเดียวกับ `*sql.DB` generated queries จึงทำงานได้ทั้งกับ connection pool ปกติและ transaction
+
+#### การทำงานของ `Store.execTx`
+
+ตัวอย่าง implementation ใน `Store`:
+
+```go
+func (store *Store) execTx(
+    ctx context.Context,
+    fn func(*Queries) error,
+) error {
+    tx, err := store.db.BeginTx(ctx, nil)
+    if err != nil {
+        return err
+    }
+
+    q := New(tx)
+    err = fn(q)
+    if err != nil {
+        if rbErr := tx.Rollback(); rbErr != nil {
+            return fmt.Errorf("tx err: %w, rb err: %w", err, rbErr)
+        }
+        return err
+    }
+
+    return tx.Commit()
+}
+```
+
+`fn func(*Queries) error` คือ callback ที่ผู้เรียกส่งเข้ามาเพื่อระบุ operations ที่ต้องทำภายใน transaction:
+
+```go
+err := store.execTx(ctx, func(q *Queries) error {
+    _, err := q.CreateTransfer(ctx, arg)
+    return err
+})
+```
+
+เมื่อ `execTx` เรียก `fn(q)` anonymous function ด้านบนจะทำงานโดยใช้ `q` ที่ผูกกับ `tx`
+
+หน้าที่ของแต่ละขั้นตอน:
+
+1. `store.db.BeginTx(ctx, nil)` เริ่ม transaction โดย `nil` หมายถึงใช้ transaction options ค่าเริ่มต้น
+2. `q := New(tx)` สร้าง `Queries` ที่ส่งทุก query ผ่าน transaction เดียวกัน
+3. `fn(q)` รันชุด operations ที่ผู้เรียกกำหนด
+4. หาก `fn` คืน error ให้ `Rollback` และคืน error กลับ
+5. หาก `Rollback` ล้มเหลวด้วย ให้รวม transaction error และ rollback error
+6. หาก `fn` สำเร็จ ให้ `Commit` และคืน commit error หากมี
+
+ภายใน callback ต้องเรียก query ผ่าน `q`:
+
+```go
+q.CreateTransfer(ctx, arg) // อยู่ใน transaction
+```
+
+ไม่ควรเรียกผ่าน `store`:
+
+```go
+store.CreateTransfer(ctx, arg) // ใช้ connection pool ปกติ อาจอยู่นอก transaction
+```
+
+ดังนั้น `execTx` แยกความรับผิดชอบสองส่วนออกจากกัน: helper จัดการ lifecycle ของ transaction ส่วน callback ระบุ business operations ที่ต้องทำเป็นชุดเดียวกัน
+
+ข้อควรระวัง:
+
+- ตรวจ error จาก `BeginTx`, operations, `Rollback` และ `Commit`
+- ส่ง `context.Context` เพื่อให้ transaction ถูกยกเลิกได้เมื่อ request หมดเวลาหรือถูกยกเลิก
+- อย่าทำงานที่ใช้เวลานานหรือเรียก external service ภายใน transaction โดยไม่จำเป็น เพราะจะถือ connection และ locks นานขึ้น
+- เมื่อหลาย transactions ล็อกหลายแถว ควรล็อกตามลำดับที่แน่นอนเพื่อลดโอกาสเกิด deadlock
+- transaction ที่ระดับ `Serializable` อาจต้องมี retry เมื่อเกิด serialization failure
+
+สรุป: Transaction รวมหลาย operations เป็นงานหนึ่งชุด ส่วน ACID อธิบายคุณสมบัติที่ทำให้งานชุดนั้นเชื่อถือได้ ได้แก่ Atomicity, Consistency, Isolation และ Durability
+
 ## การตั้งค่า sqlc
 
 ไฟล์ `sqlc.yaml` ใช้บอก `sqlc` ว่าจะอ่าน schema และ SQL query จากที่ใด รวมถึงกำหนดรูปแบบของ Go code ที่ต้องการสร้าง:
@@ -1145,6 +1362,96 @@ queries := db.New(conn)
 
 ดังนั้น `Queries` ควรสร้างผ่าน `New` ส่วน struct ที่เป็นข้อมูลธรรมดาและเปิด fields ให้กำหนดโดยตั้งใจ สามารถใช้ struct literal โดยตรงได้
 
+#### Embedded Field
+
+Embedded field คือการใส่ type เข้าไปใน `struct` โดยไม่ตั้งชื่อ field เอง:
+
+```go
+type Store struct {
+    *Queries
+    db *sql.DB
+}
+```
+
+ในตัวอย่างนี้ `*Queries` เป็น embedded field ส่วน `db *sql.DB` เป็น field ปกติที่มีชื่อ `db`
+
+เปรียบเทียบกับ field ปกติ:
+
+```go
+type Store struct {
+    queries *Queries
+}
+
+store.queries.CreateAccount(ctx, arg)
+```
+
+เมื่อใช้ embedded field Go จะใช้ชื่อ type เป็นชื่อ field จึงเข้าถึงได้ว่า:
+
+```go
+store.Queries.CreateAccount(ctx, arg)
+```
+
+และ methods ของ `Queries` จะถูก promote ขึ้นมาให้เรียกผ่าน `Store` โดยตรงได้:
+
+```go
+store.CreateAccount(ctx, arg)
+```
+
+การเรียกสองรูปแบบนี้ทำงานผ่าน `Queries` ตัวเดียวกัน:
+
+```go
+store.Queries.CreateAccount(ctx, arg)
+store.CreateAccount(ctx, arg)
+```
+
+การที่ method ของ embedded type เรียกผ่าน struct ภายนอกได้โดยตรงเรียกว่า **method promotion**
+
+สร้าง `Store` และกำหนด embedded field ได้ว่า:
+
+```go
+func NewStore(db *sql.DB) *Store {
+    return &Store{
+        db:      db,
+        Queries: New(db),
+    }
+}
+```
+
+แม้ประกาศเป็น pointer `*Queries` ชื่อ field ที่ใช้ใน struct literal ยังคงเป็น `Queries`
+
+Embedding เป็น composition หรือความสัมพันธ์แบบ “มี”:
+
+```text
+Store has a Queries
+```
+
+ไม่ใช่ inheritance หรือความสัมพันธ์แบบ “เป็น” ดังนั้น `*Store` ไม่ได้กลายเป็น `*Queries` และไม่สามารถส่ง `store` ให้ฟังก์ชันที่รับ `*Queries` โดยตรง:
+
+```go
+func RunQueries(q *Queries) {}
+
+RunQueries(store)         // compile error
+RunQueries(store.Queries) // ถูกต้อง
+```
+
+หาก `Store` และ embedded `Queries` มี method ชื่อเดียวกัน Go จะเลือก method ของ `Store` ก่อน:
+
+```go
+store.Save()         // เรียก Store.Save
+store.Queries.Save() // เรียก Queries.Save โดยตรง
+```
+
+ข้อควรระวังคือ embedded pointer อาจเป็น `nil`:
+
+```go
+store := &Store{}
+store.CreateAccount(ctx, arg) // อาจ panic เพราะ store.Queries เป็น nil
+```
+
+จึงควรสร้างผ่าน `NewStore(db)` เพื่อกำหนดทั้ง `db` และ embedded `Queries` ให้พร้อมใช้งาน
+
+ในโปรเจกต์นี้ `Store` embed `*Queries` เพื่อเรียก generated query methods ได้โดยตรง และเก็บ `db *sql.DB` แยกไว้เพื่อเริ่ม transaction ด้วย `BeginTx`
+
 ### Interface
 
 `interface` กำหนดชุดความสามารถหรือ methods ที่ค่าชนิดหนึ่งต้องมี โดยไม่ได้กำหนด implementation:
@@ -1429,9 +1736,63 @@ requestID, ok := ctx.Value(requestIDKey).(string)
 
 ควรสร้าง key type เฉพาะเพื่อลดโอกาสชนกับ key จาก package อื่น และไม่ควรใช้ Context แทน parameters ของ business logic เช่น `accountID` ควรส่งตรงผ่าน `GetAccount(ctx, accountID)`
 
+#### ทำไมใช้ `context.Context` แทน `*context.Context`
+
+`context.Context` เป็น interface อยู่แล้ว:
+
+```go
+type Context interface {
+    Deadline() (time.Time, bool)
+    Done() <-chan struct{}
+    Err() error
+    Value(key any) any
+}
+```
+
+จึงควรรับแบบนี้:
+
+```go
+func DoSomething(ctx context.Context) error
+```
+
+ไม่ควรรับ pointer ไปยัง interface:
+
+```go
+func DoSomething(ctx *context.Context) error // ไม่แนะนำ
+```
+
+ค่า interface เก็บทั้ง concrete type และ concrete value ไว้ภายใน โดย implementation จริงอาจเป็น pointer อยู่แล้ว เช่นแนวคิดนี้:
+
+```text
+context.Context interface
+    └── *cancelCtx
+```
+
+เมื่อส่ง `ctx` เข้า function Go จะ copy ค่า interface ขนาดเล็ก แต่ยังอ้างถึง context implementation เดิม สัญญาณ cancellation, deadline และ values จึงยังทำงานกับ context tree เดียวกัน ไม่ได้ copy ข้อมูลทั้งหมดแยกออกมา
+
+`*context.Context` เป็น pointer ไปยังกล่อง interface ไม่ใช่ pointer ไปยัง implementation ภายใน ทำให้ caller ต้องส่ง `&ctx` และภายในต้อง dereference โดยแทบไม่มีประโยชน์:
+
+```go
+func DoSomething(ctx *context.Context) {
+    err := (*ctx).Err()
+    _ = err
+}
+```
+
+หลักการเดียวกันใช้กับ interface อื่น เช่น `DBTX`:
+
+```go
+func New(db DBTX) *Queries
+```
+
+ไม่ต้องใช้ `*DBTX` เพราะ interface สามารถเก็บ concrete pointer อย่าง `*sql.DB` หรือ `*sql.Tx` อยู่ภายในได้
+
+สรุป: รับ interface เป็น value ตามปกติ และใช้ pointer กับ concrete struct เมื่อจำเป็น ไม่ควรใช้ pointer to interface เว้นแต่มีกรณีพิเศษที่ต้องเปลี่ยนค่า interface variable ของผู้เรียกโดยตรง
+
 #### แนวทางการใช้ Context
 
 - รับ context เป็น parameter ตัวแรก เช่น `func DoSomething(ctx context.Context, ...)`
+- รับเป็น `context.Context` ไม่ใช่ `*context.Context`
 - ส่ง context เดิมต่อไปยังชั้นล่าง
 - ใน HTTP handler ให้ใช้ `r.Context()` แทนการสร้าง `Background()` ใหม่
 - อย่าส่ง `nil`; หากไม่มี context ให้ใช้ `context.Background()`
