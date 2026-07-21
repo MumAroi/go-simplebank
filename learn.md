@@ -132,13 +132,106 @@ WHERE id = $1
 FOR UPDATE;
 ```
 
-Isolation levels หลักของ PostgreSQL:
+ปัญหาจาก concurrency ที่ควรรู้:
 
-- `Read Committed` เป็นค่าเริ่มต้น แต่ละ statement เห็นเฉพาะข้อมูลที่ commit แล้วก่อน statement นั้นเริ่ม
-- `Repeatable Read` transaction อ่านจาก snapshot เดิมตลอด transaction
-- `Serializable` เข้มงวดที่สุด ให้ผลเสมือน transactions ทำทีละรายการ แต่อาจเกิด serialization failure และ application ต้อง retry
+- Dirty Read คืออ่านข้อมูลที่ transaction อื่นยังไม่ commit และอาจ rollback ภายหลัง
+- Non-repeatable Read คืออ่านแถวเดิมสองครั้งใน transaction เดียวกันแต่ได้ค่าต่างกัน
+- Phantom Read คือรัน query ด้วยเงื่อนไขเดิมซ้ำ แต่จำนวนหรือชุดของแถวเปลี่ยนไป
+- Lost Update คือหลาย transactions คำนวณจากค่าเก่าเดียวกัน แล้ว update หนึ่งเขียนทับอีกอัน
+- Write Skew คือ transactions อ่าน snapshot ที่ดูถูกต้องและแก้คนละแถว แต่ผลรวมหลัง commit ผิด business invariant
 
-Isolation level ที่เข้มงวดขึ้นช่วยลด concurrency anomalies แต่มีต้นทุนด้าน locking, retry หรือ throughput จึงควรเลือกตามความต้องการของงาน
+PostgreSQL รองรับชื่อ isolation levels ตามมาตรฐาน SQL สี่ระดับ แต่ `Read Uncommitted` ทำงานเหมือน `Read Committed`
+
+##### Read Uncommitted
+
+ตามมาตรฐาน SQL ระดับนี้อาจอ่านข้อมูลที่ยังไม่ commit ได้ แต่ PostgreSQL ไม่อนุญาต Dirty Read และยกระดับพฤติกรรมให้เหมือน `Read Committed` ดังนั้นการเลือก `Read Uncommitted` ใน PostgreSQL ไม่ได้ทำให้อ่าน uncommitted changes ได้
+
+##### Read Committed
+
+เป็นค่าเริ่มต้นของ PostgreSQL แต่ละ SQL statement จะสร้าง snapshot ใหม่ตอน statement เริ่ม และเห็นเฉพาะข้อมูลที่ commit แล้วก่อน snapshot นั้น:
+
+```text
+Transaction A                  Transaction B
+─────────────                  ─────────────
+SELECT balance → 1000
+                               UPDATE balance = 500
+                               COMMIT
+SELECT balance → 500
+```
+
+จึงป้องกัน Dirty Read แต่ Non-repeatable Read และ Phantom Read ยังเกิดได้ เพราะ statements สองตัวใน transaction เดียวกันอาจเห็นคนละ snapshot
+
+Atomic update ช่วยลดปัญหา Lost Update:
+
+```sql
+UPDATE accounts
+SET balance = balance + 100
+WHERE id = 1;
+```
+
+ปลอดภัยกว่าการ `SELECT` ค่าไปคำนวณใน Go แล้ว `UPDATE` ค่าผลลัพธ์ เพราะ PostgreSQL สามารถล็อก row และคำนวณจากค่าที่ commit ล่าสุดให้
+
+##### Repeatable Read
+
+Transaction อ่านจาก snapshot เดิมตลอดอายุ transaction จึงอ่านแถวหรือ query เงื่อนไขเดิมซ้ำแล้วเห็นข้อมูลชุดเดิม แม้ transaction อื่นจะ commit ระหว่างนั้น:
+
+```text
+Transaction A                  Transaction B
+─────────────                  ─────────────
+BEGIN REPEATABLE READ
+SELECT balance → 1000
+                               UPDATE balance = 500
+                               COMMIT
+SELECT balance → 1000
+```
+
+Transaction ยังเห็นการเปลี่ยนแปลงที่ตัวเองทำ ภายใต้ PostgreSQL ระดับนี้ป้องกันทั้ง Non-repeatable Read และ Phantom Read ซึ่งเข้มกว่าข้อกำหนดขั้นต่ำของมาตรฐาน SQL
+
+หาก transaction พยายาม update row ที่ถูก transaction อื่นเปลี่ยนและ commit หลัง snapshot ของตน PostgreSQL อาจคืน error:
+
+```text
+could not serialize access due to concurrent update
+```
+
+เมื่อเกิด error ต้อง rollback และ retry ทั้ง transaction ไม่ควร retry เฉพาะ statement เพราะข้อมูลก่อนหน้านั้นมาจาก snapshot เก่า อย่างไรก็ตาม Repeatable Read ยังเกิด Write Skew ได้เมื่อ transactions แก้คนละ rows แต่ร่วมกันละเมิด business invariant
+
+##### Serializable
+
+เป็นระดับเข้มงวดที่สุด ผลที่ commit ต้องเทียบเท่ากับการนำ transactions มาเรียงทำทีละรายการ แม้ในความเป็นจริงจะทำพร้อมกัน PostgreSQL ตรวจจับ serialization anomalies และยกเลิก transaction บางตัวเพื่อรักษาความถูกต้อง:
+
+```text
+could not serialize access due to read/write dependencies among transactions
+```
+
+Application จึงต้องออกแบบให้ retry transaction ทั้งชุดได้ ระดับนี้เหมาะกับ business rules ที่สัมพันธ์กับหลาย rows และไม่สามารถป้องกันได้ง่ายด้วย constraint, atomic update หรือ row lock แต่มีต้นทุนจากการตรวจจับ conflicts, aborted transactions และ retries
+
+##### เปรียบเทียบ Isolation Levels
+
+| ระดับใน PostgreSQL | Snapshot | Non-repeatable Read | Phantom Read | Write Skew | อาจต้อง retry |
+| --- | --- | --- | --- | --- | --- |
+| Read Uncommitted | เหมือน Read Committed | เกิดได้ | เกิดได้ | เกิดได้ | บางกรณี |
+| Read Committed | ใหม่ทุก statement | เกิดได้ | เกิดได้ | เกิดได้ | บางกรณี |
+| Repeatable Read | เดิมตลอด transaction | ป้องกัน | ป้องกัน | ยังเกิดได้ | ใช่ |
+| Serializable | ผลเสมือนทำทีละ transaction | ป้องกัน | ป้องกัน | ป้องกันเมื่อ retry สำเร็จ | ใช่ |
+
+ตั้งระดับใน Go ด้วย `sql.TxOptions`:
+
+```go
+tx, err := db.BeginTx(ctx, &sql.TxOptions{
+    Isolation: sql.LevelRepeatableRead,
+})
+```
+
+หากส่ง `nil` ให้ `BeginTx` จะใช้ค่าเริ่มต้นของฐานข้อมูล ซึ่งสำหรับ PostgreSQL คือ `Read Committed`
+
+แนวทางเลือกใช้:
+
+- CRUD ทั่วไปและ atomic updates เริ่มจาก `Read Committed`
+- งานที่ต้องอ่าน snapshot สอดคล้องกันหลายครั้งใช้ `Repeatable Read`
+- invariant ซับซ้อนข้ามหลาย rows อาจใช้ `Serializable` พร้อม retry
+- ก่อนเพิ่ม isolation level ให้พิจารณา database constraints, atomic conditional update และ `SELECT ... FOR UPDATE` เพราะมักแก้ปัญหาได้ตรงจุดกว่า
+
+Isolation level ที่เข้มงวดขึ้นไม่ได้ดีกว่าเสมอ เพราะอาจเพิ่ม conflicts, retries และลด throughput ควรเลือกตาม anomaly ที่ workflow ต้องป้องกันและทดสอบด้วย concurrent workload จริง
 
 #### Durability — Commit แล้วข้อมูลต้องคงอยู่
 
