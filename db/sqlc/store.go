@@ -24,7 +24,7 @@ func (store *Store) execTx(ctx context.Context, fn func(*Queries) error) error {
 		return err
 	}
 
-	q := New(tx)
+	q := store.Queries.WithTx(tx)
 	err = fn(q)
 	if err != nil {
 		if rbErr := tx.Rollback(); rbErr != nil {
