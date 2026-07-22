@@ -170,7 +170,69 @@ PostgreSQL รองรับชื่อ isolation levels ตามมาตร
 
 ##### Read Uncommitted
 
-ตามมาตรฐาน SQL ระดับนี้อาจอ่านข้อมูลที่ยังไม่ commit ได้ แต่ PostgreSQL ไม่อนุญาต Dirty Read และยกระดับพฤติกรรมให้เหมือน `Read Committed` ดังนั้นการเลือก `Read Uncommitted` ใน PostgreSQL ไม่ได้ทำให้อ่าน uncommitted changes ได้
+ตามมาตรฐาน SQL ระดับนี้อนุญาตให้ transaction หนึ่งอ่านข้อมูลที่ transaction อื่นแก้ไขแล้วแต่ยังไม่ได้ `COMMIT` ข้อมูลนั้นอาจถูก `ROLLBACK` ภายหลัง การอ่านลักษณะนี้เรียกว่า Dirty Read
+
+ตัวอย่างข้อมูลเริ่มต้นมี balance เท่ากับ `100`:
+
+```text
+Transaction A                  Transaction B
+─────────────                  ─────────────
+UPDATE balance = 0
+ยังไม่ COMMIT
+                               SELECT balance
+                               อาจอ่านได้ 0 ← Dirty Read
+ROLLBACK
+balance กลับเป็น 100
+```
+
+Transaction B เคยอ่านค่า `0` ที่ไม่เคยถูกบันทึกจริง เพราะ Transaction A ยกเลิกการเปลี่ยนแปลงภายหลัง หาก B นำค่านี้ไปตัดสินใจ อาจปฏิเสธรายการ ส่ง notification หรือสร้างรายงานผิด
+
+อย่างไรก็ตาม PostgreSQL **ไม่อนุญาต Dirty Read** แม้จะระบุ:
+
+```sql
+BEGIN TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+```
+
+PostgreSQL จะให้พฤติกรรมเหมือน `Read Committed` ในตัวอย่างเดิม Transaction B จึงยังเห็น balance ที่ commit ล่าสุดคือ `100` ไม่เห็นค่า `0` ที่ A ยังไม่ได้ commit:
+
+```text
+Transaction A                  Transaction B
+─────────────                  ─────────────
+UPDATE balance = 0
+ยังไม่ COMMIT
+                               SELECT balance
+                               อ่านได้ 100
+ROLLBACK
+```
+
+PostgreSQL ใช้ MVCC เพื่อเก็บ row หลายเวอร์ชันและเลือกแสดงเฉพาะเวอร์ชันที่ transaction มีสิทธิ์มองเห็น:
+
+```text
+accounts row
+├── เวอร์ชันที่ commit แล้ว:     balance = 100
+└── เวอร์ชันที่ยังไม่ commit:   balance = 0
+```
+
+Transaction A เห็นการแก้ไข `0` ของตัวเอง ส่วน transaction อื่นยังเห็นเวอร์ชันที่ commit แล้วคือ `100`
+
+พฤติกรรมจริงใน PostgreSQL:
+
+| ระดับที่ระบุ | พฤติกรรมจริง |
+| --- | --- |
+| `READ UNCOMMITTED` | `READ COMMITTED` |
+| `READ COMMITTED` | `READ COMMITTED` |
+
+ทั้งสองระดับไม่เกิด Dirty Read แต่ยังเกิด Non-repeatable Read และ Phantom Read ได้ เพราะแต่ละ statement ใช้ snapshot ใหม่ PostgreSQL ยอมรับชื่อ `READ UNCOMMITTED` เพื่อความเข้ากันได้กับ SQL standard แต่ให้การรับประกันที่แข็งแรงกว่ามาตรฐานขั้นต่ำ
+
+ใน Go สามารถระบุ `sql.LevelReadUncommitted` ได้ แต่เมื่อใช้ PostgreSQL ผลจะเหมือน `sql.LevelReadCommitted` จึงควรเลือก `Read Committed` โดยตรงเพื่อสื่อพฤติกรรมจริงให้คนอ่านโค้ดเข้าใจชัดเจน
+
+สรุป:
+
+```text
+SQL standard: Read Uncommitted อาจเกิด Dirty Read
+PostgreSQL:    Read Uncommitted ทำงานเหมือน Read Committed
+               และไม่เห็นข้อมูลของ transaction อื่นที่ยังไม่ commit
+```
 
 ##### Read Committed
 
