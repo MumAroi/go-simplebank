@@ -2697,7 +2697,7 @@ class AccountService {
 
 ## 13. GitHub Actions และ CI Workflow
 
-ไฟล์ `.github/workflows/ci.yml` กำหนด Continuous Integration (CI) ของโปรเจกต์ เมื่อเกิด event ที่กำหนด GitHub Actions จะสร้าง runner ชั่วคราวขึ้นมา checkout source code, เตรียม Go, build และรัน tests โดยอัตโนมัติ
+ไฟล์ `.github/workflows/ci.yml` กำหนด Continuous Integration (CI) ของโปรเจกต์ เมื่อเกิด event ที่กำหนด GitHub Actions จะสร้าง runner ชั่วคราวและ PostgreSQL service จากนั้น checkout source code, เตรียม Go, ติดตั้ง migration CLI, apply migrations และรัน tests โดยอัตโนมัติ
 
 ```yaml
 name: ci-test
@@ -2709,21 +2709,44 @@ on:
     branches: ["main"]
 
 jobs:
-  build:
+  test:
+    name: Test
     runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:12
+        env:
+          POSTGRES_USER: root
+          POSTGRES_PASSWORD: secret
+          POSTGRES_DB: simple_bank
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up Go
         uses: actions/setup-go@v4
         with:
-          go-version: "1.20"
+          go-version: "1.26"
 
-      - name: Build
-        run: go build -v ./...
+      - name: Install golang-migrate
+        run: |
+          curl -L https://github.com/golang-migrate/migrate/releases/download/v4.19.1/migrate.linux-amd64.tar.gz | tar xvz
+          sudo mv migrate /usr/bin/migrate
+          which migrate
+
+      - name: Run migrations
+        run: make migrateup
 
       - name: Test
-        run: go test -v ./...
+        run: make test
 ```
 
 ### Workflow ทำงานเมื่อใด
@@ -2753,12 +2776,14 @@ on:
 
 ```yaml
 jobs:
-  build:
+  test:
+    name: Test
     runs-on: ubuntu-latest
 ```
 
 - `jobs` รวมงานทั้งหมดของ workflow
-- `build` เป็น ID ของ job ชื่อจะตั้งเป็นอย่างอื่นก็ได้ และไม่ได้หมายความว่า job ทำเฉพาะ build
+- `test` เป็น ID ของ job ที่ใช้ภายใน workflow
+- `name: Test` เป็นชื่อที่แสดงในหน้า GitHub Actions และสถานะ check
 - `runs-on: ubuntu-latest` ให้ GitHub สร้าง Linux runner ชั่วคราวสำหรับ job นี้
 
 แต่ละ job เริ่มจาก environment ใหม่ ไฟล์และโปรแกรมที่เตรียมใน job อื่นจะไม่ถูกแชร์โดยอัตโนมัติ เมื่อ job จบ runner จะถูกทิ้ง
@@ -2774,10 +2799,13 @@ Checkout source code
 ติดตั้ง/เลือก Go
        │
        ▼
-Build ทุก package
+ติดตั้ง golang-migrate
        │
        ▼
-Test ทุก package
+Apply database migrations
+       │
+       ▼
+รัน tests ผ่าน Makefile
 ```
 
 #### Checkout Repository
@@ -2800,41 +2828,85 @@ Test ทุก package
 - name: Set up Go
   uses: actions/setup-go@v4
   with:
-    go-version: "1.20"
+    go-version: "1.26"
 ```
 
 - `name` เป็นข้อความที่แสดงในหน้า log
 - `actions/setup-go` ดาวน์โหลดหรือเลือก Go toolchain ให้ runner
 - `with` ส่ง inputs ให้ action
-- `go-version: "1.20"` ขอ Go รุ่น 1.20
+- `go-version: "1.26"` ขอ Go รุ่นล่าสุดที่ตรงกับสาย 1.26
 
 ควรใส่เลขเวอร์ชันในเครื่องหมายคำพูดเพื่อให้ YAML ตีความเป็น string
 
-#### Build
+#### PostgreSQL Service
 
 ```yaml
-- name: Build
-  run: go build -v ./...
+services:
+  postgres:
+    image: postgres:12
+    env:
+      POSTGRES_USER: root
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: simple_bank
+    ports:
+      - 5432:5432
+    options: >-
+      --health-cmd pg_isready
+      --health-interval 10s
+      --health-timeout 5s
+      --health-retries 5
 ```
 
-`run` รัน shell command บน runner:
+- `services` สร้าง containers ที่ job ต้องใช้
+- `image: postgres:12` ใช้ PostgreSQL image รุ่น 12
+- `env` กำหนด user `root`, password `secret` และสร้าง database `simple_bank`
+- `ports: 5432:5432` map port 5432 ของ runner ไปยัง port 5432 ของ container ทำให้คำสั่งบน runner เชื่อมผ่าน `localhost:5432` ได้
+- `options` กำหนด Docker health check โดย GitHub จะรอให้ service healthy ก่อนเริ่ม steps
 
-- `go build` compile packages และตรวจ compile errors
-- `-v` แสดงชื่อ packages ขณะ build
-- `./...` หมายถึงทุก Go package ใน module และโฟลเดอร์ย่อย
+`POSTGRES_DB` สร้าง database เปล่าเท่านั้น ยังไม่มี tables จึงต้อง apply migrations ก่อน tests
 
-สำหรับ packages ที่ไม่ใช่ executable คำสั่งนี้ตรวจว่า compile ได้ แต่ไม่สร้าง binary ที่นำไปใช้งานถาวร
+#### Install golang-migrate
+
+```yaml
+- name: Install golang-migrate
+  run: |
+    curl -L https://github.com/golang-migrate/migrate/releases/download/v4.19.1/migrate.linux-amd64.tar.gz | tar xvz
+    sudo mv migrate /usr/bin/migrate
+    which migrate
+```
+
+- `run: |` รัน shell script หลายบรรทัด
+- `curl -L` ดาวน์โหลด archive ของ `golang-migrate` v4.19.1 สำหรับ Linux AMD64
+- `tar xvz` แตก archive ซึ่งได้ executable ชื่อ `migrate`
+- `sudo mv migrate /usr/bin/migrate` ติดตั้ง executable ไว้ใน `PATH`
+- `which migrate` ยืนยันว่า shell ค้นพบคำสั่ง `migrate`
+
+ควรใช้ `curl -fL` หากต้องการให้ step ล้มเหลวทันทีเมื่อ server คืน HTTP error
+
+#### Run Migrations
+
+```yaml
+- name: Run migrations
+  run: make migrateup
+```
+
+เรียก target `migrateup` ใน `Makefile` เพื่อนำไฟล์ใน `db/migration` ไปสร้าง schema จริงใน PostgreSQL service ขั้นตอนนี้ต้องสำเร็จก่อน integration tests ที่เรียก tables
 
 #### Test
 
 ```yaml
 - name: Test
-  run: go test -v ./...
+  run: make test
 ```
 
-- `go test` compile test binary และรัน tests
-- `-v` แสดงชื่อและผลของแต่ละ test
-- `./...` รัน tests ทุก package ใน module
+คำสั่งนี้เรียก target `test` ใน `Makefile` ซึ่งปัจจุบันกำหนดว่า:
+
+```makefile
+test:
+	go test -v -cover ./...
+```
+
+จึง compile และรัน tests ทุก package พร้อม verbose output และรายงาน coverage หาก test ใดล้มเหลว command จะคืน exit code ที่ไม่ใช่ `0` ทำให้ step และ workflow ล้มเหลว
 
 หาก test ใดล้มเหลว command จะคืน exit code ที่ไม่ใช่ `0` ทำให้ step และ workflow ล้มเหลว GitHub จึงสามารถใช้ workflow นี้เป็น required status check ก่อน merge Pull Request ได้
 
@@ -2843,25 +2915,25 @@ Test ทุก package
 | รูปแบบ | หน้าที่ | ตัวอย่าง |
 | --- | --- | --- |
 | `uses` | เรียก Action ที่มีผู้อื่นหรือโปรเจกต์เตรียมไว้ | `actions/checkout@v4` |
-| `run` | รัน shell command โดยตรงบน runner | `go test -v ./...` |
+| `run` | รัน shell command โดยตรงบน runner | `make test` |
 
-### ปัญหาใน Workflow ปัจจุบัน
+### สถานะและข้อสังเกตของ Workflow ปัจจุบัน
 
-#### Go Version ไม่ตรงกับ `go.mod`
+#### Go Version
 
-Workflow ขอ Go 1.20:
+Workflow ปัจจุบันขอ Go สาย 1.26:
 
 ```yaml
-go-version: "1.20"
+go-version: "1.26"
 ```
 
-แต่ `go.mod` ของโปรเจกต์ระบุ:
+ซึ่งสอดคล้องกับ major/minor ของ `go.mod`:
 
 ```go
 go 1.26.4
 ```
 
-Go toolchain ใน CI ต้องรองรับเวอร์ชันที่ module กำหนด มิฉะนั้น build หรือ test อาจหยุดตั้งแต่การอ่าน `go.mod` ควรให้ workflow ใช้เวอร์ชันเดียวกับโปรเจกต์ หรืออ่านจาก `go.mod` โดยตรง:
+`go-version: "1.26"` ให้ setup action เลือก patch release ที่ตรงกับสาย 1.26 หากต้องการให้ `go.mod` เป็น source of truth โดยตรง สามารถใช้:
 
 ```yaml
 - name: Set up Go
@@ -2870,9 +2942,9 @@ Go toolchain ใน CI ต้องรองรับเวอร์ชันท
     go-version-file: go.mod
 ```
 
-การมี source of truth ที่ `go.mod` ช่วยลดโอกาสแก้ Go version ในจุดหนึ่งแล้วลืมแก้อีกจุด
+วิธีนี้ลดโอกาสแก้ Go version ใน `go.mod` แล้วลืมอัปเดต workflow
 
-#### Integration Tests ยังไม่มี PostgreSQL
+#### PostgreSQL และ Migrations พร้อมสำหรับ Integration Tests
 
 Tests ใน `db/sqlc` เชื่อมต่อ:
 
@@ -2880,36 +2952,22 @@ Tests ใน `db/sqlc` เชื่อมต่อ:
 postgresql://root:secret@localhost:5432/simple_bank?sslmode=disable
 ```
 
-แต่ runner ใหม่ไม่มี PostgreSQL database และ schema ของโปรเจกต์พร้อมใช้งานโดยอัตโนมัติ Workflow จึงต้องทำอย่างน้อยสามอย่างก่อน `go test`:
+Workflow ปัจจุบันเตรียมองค์ประกอบที่จำเป็นแล้ว:
 
-1. เริ่ม PostgreSQL service ที่มี user, password และ database ตรงกับ test configuration
-2. รอจน PostgreSQL พร้อมรับ connection
-3. apply migrations จาก `db/migration`
+1. PostgreSQL service สร้าง database `simple_bank`
+2. Port mapping ทำให้ runner เชื่อมผ่าน `localhost:5432`
+3. Health check รอจน PostgreSQL พร้อม
+4. Step ติดตั้ง `golang-migrate`
+5. `make migrateup` apply schema ก่อน `make test`
 
-ตัวอย่างเพิ่ม PostgreSQL service ใน job:
+ค่ารหัสผ่านแบบ plain text ใน workflow นี้ใช้กับ database ชั่วคราวสำหรับ tests และตรงกับ test configuration เท่านั้น ไม่ควรนำ credentials ของ production มาเขียนในไฟล์ ค่าจริงของ environment ภายนอกควรเก็บใน GitHub Secrets
 
-```yaml
-jobs:
-  build:
-    runs-on: ubuntu-latest
+#### จุดที่ปรับปรุงได้
 
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_USER: root
-          POSTGRES_PASSWORD: secret
-          POSTGRES_DB: simple_bank
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U root -d simple_bank"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 5
-```
-
-Service นี้สร้าง database เปล่าเท่านั้น ยังต้องติดตั้งหรือเรียก migration tool แล้วรัน migrations ก่อน test
+- ใช้ `curl -fL` แทน `curl -L` เพื่อให้การดาวน์โหลดล้มเหลวทันทีเมื่อ HTTP response เป็น error
+- ใช้ `go-version-file: go.mod` เพื่อลดการกำหนดเวอร์ชันซ้ำ
+- ระบุ user และ database ใน health check เช่น `pg_isready -U root -d simple_bank` เพื่อให้ตรวจ service เป้าหมายชัดเจนขึ้น
+- สามารถเพิ่ม dependency cache ผ่านความสามารถของ `actions/setup-go` เพื่อลดเวลารันในอนาคต
 
 ### Workflow ที่สมบูรณ์ควรมีลำดับอย่างไร
 
@@ -2923,16 +2981,16 @@ Trigger: push/PR เข้า main
 Checkout repository
              │
              ▼
-Setup Go จาก go.mod
+Setup Go 1.26
              │
              ▼
-ดาวน์โหลด dependencies / build
+ติดตั้ง golang-migrate v4.19.1
              │
              ▼
-Apply database migrations
+make migrateup
              │
              ▼
-Run tests
+make test
              │
       ┌──────┴──────┐
       ▼             ▼
@@ -2940,4 +2998,4 @@ Run tests
    check ผ่าน     check ไม่ผ่าน
 ```
 
-สรุป: `ci.yml` ทำหน้าที่ตรวจว่า source code บน `main` และ Pull Requests ที่จะเข้า `main` ยัง build และ test ผ่าน แต่ workflow ปัจจุบันควรปรับ Go version ให้ตรง `go.mod` และเตรียม PostgreSQL พร้อม migrations ก่อน integration tests จึงจะทำงานครบถ้วน
+สรุป: `ci.yml` ปัจจุบันตรวจ source code ที่ push เข้า `main` และ Pull Requests ที่จะเข้า `main` โดยสร้าง PostgreSQL ชั่วคราว เตรียม Go 1.26, ติดตั้ง migration CLI, apply schema และรัน tests ผ่าน Makefile หากขั้นตอนใดคืน exit code ที่ไม่ใช่ `0` job จะล้มเหลวและแสดงเป็น check ที่ไม่ผ่านบน GitHub

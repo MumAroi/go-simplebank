@@ -1,0 +1,22 @@
+info:
+  name: create account
+  type: http
+  seq: 2
+
+http:
+  method: POST
+  url: http://localhost:8081/accounts
+  body:
+    type: json
+    data: |
+      {
+        "owner": "Tom",
+        "currency": "USD"
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
