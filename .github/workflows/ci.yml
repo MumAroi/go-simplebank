@@ -33,6 +33,9 @@ jobs:
               with:
                   go-version: "1.26"
 
+            - name: Create .env file
+              run: cp .env.example .env
+
             - name: Install golang-migrate
               run: |
                   curl -L https://github.com/golang-migrate/migrate/releases/download/v4.19.1/migrate.linux-amd64.tar.gz | tar xvz
