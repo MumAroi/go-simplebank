@@ -21,6 +21,7 @@
 10. [การสร้างข้อมูลสุ่มสำหรับ Tests](#10-การสร้างข้อมูลสุ่มสำหรับ-tests)
 11. [Test Coverage](#11-test-coverage)
 12. [Struct, Interface, Context และ Dependency Injection](#12-struct-interface-context-และ-dependency-injection)
+13. [GitHub Actions และ CI Workflow](#13-github-actions-และ-ci-workflow)
 
 > แนะนำให้อ่านตามลำดับบท โดยบทที่ 1–4 เน้นฐานข้อมูลและ generated code, บทที่ 5–6 เน้น syntax ของ Go, บทที่ 7–11 เน้น testing และบทที่ 12 เชื่อมแนวคิดด้านการออกแบบ application เข้าด้วยกัน
 
@@ -2693,3 +2694,250 @@ class AccountService {
 | `(value, error)` | `Promise<value>` และ exception/error |
 
 สรุป: `struct` เก็บ state และ dependencies, `interface` กำหนดความสามารถ, Dependency Injection ส่ง implementation เข้ามาจากภายนอก และ `context` ควบคุมอายุของงานที่ไหลผ่านแต่ละชั้นของ application
+
+## 13. GitHub Actions และ CI Workflow
+
+ไฟล์ `.github/workflows/ci.yml` กำหนด Continuous Integration (CI) ของโปรเจกต์ เมื่อเกิด event ที่กำหนด GitHub Actions จะสร้าง runner ชั่วคราวขึ้นมา checkout source code, เตรียม Go, build และรัน tests โดยอัตโนมัติ
+
+```yaml
+name: ci-test
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.20"
+
+      - name: Build
+        run: go build -v ./...
+
+      - name: Test
+        run: go test -v ./...
+```
+
+### Workflow ทำงานเมื่อใด
+
+```yaml
+name: ci-test
+```
+
+ตั้งชื่อ workflow ที่แสดงในหน้า Actions และสถานะ checks ของ Pull Request
+
+```yaml
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+```
+
+กำหนด triggers สองกรณี:
+
+- `push` รันเมื่อมี commit ถูก push เข้า branch `main`
+- `pull_request` รันเมื่อ Pull Request มี branch ปลายทางเป็น `main` เช่นเปิด PR, push commit ใหม่เข้า PR หรือ reopen PR ตาม activity types เริ่มต้นของ GitHub
+
+การ push เข้า feature branch ที่ยังไม่มี Pull Request targeting `main` จะไม่ทำให้ workflow นี้รัน
+
+### Jobs และ Runner
+
+```yaml
+jobs:
+  build:
+    runs-on: ubuntu-latest
+```
+
+- `jobs` รวมงานทั้งหมดของ workflow
+- `build` เป็น ID ของ job ชื่อจะตั้งเป็นอย่างอื่นก็ได้ และไม่ได้หมายความว่า job ทำเฉพาะ build
+- `runs-on: ubuntu-latest` ให้ GitHub สร้าง Linux runner ชั่วคราวสำหรับ job นี้
+
+แต่ละ job เริ่มจาก environment ใหม่ ไฟล์และโปรแกรมที่เตรียมใน job อื่นจะไม่ถูกแชร์โดยอัตโนมัติ เมื่อ job จบ runner จะถูกทิ้ง
+
+### Steps ทำงานตามลำดับ
+
+Steps ใน job เดียวกันทำงานจากบนลงล่าง หาก step หนึ่งล้มเหลว steps ปกติที่เหลือจะไม่ทำงาน และ job จะมีสถานะ failed
+
+```text
+Checkout source code
+       │
+       ▼
+ติดตั้ง/เลือก Go
+       │
+       ▼
+Build ทุก package
+       │
+       ▼
+Test ทุก package
+```
+
+#### Checkout Repository
+
+```yaml
+- uses: actions/checkout@v4
+```
+
+`uses` เรียก reusable GitHub Action ในที่นี้ `actions/checkout` ดาวน์โหลด source code ของ commit หรือ Pull Request ที่กำลังตรวจมายัง runner หากไม่มี step นี้ คำสั่ง `go build` จะไม่พบไฟล์โปรเจกต์
+
+รูปแบบ `owner/action@version` แยกได้เป็น:
+
+- `actions` คือเจ้าของ action
+- `checkout` คือชื่อ action
+- `@v4` คือ major version ที่เลือกใช้
+
+#### Set up Go
+
+```yaml
+- name: Set up Go
+  uses: actions/setup-go@v4
+  with:
+    go-version: "1.20"
+```
+
+- `name` เป็นข้อความที่แสดงในหน้า log
+- `actions/setup-go` ดาวน์โหลดหรือเลือก Go toolchain ให้ runner
+- `with` ส่ง inputs ให้ action
+- `go-version: "1.20"` ขอ Go รุ่น 1.20
+
+ควรใส่เลขเวอร์ชันในเครื่องหมายคำพูดเพื่อให้ YAML ตีความเป็น string
+
+#### Build
+
+```yaml
+- name: Build
+  run: go build -v ./...
+```
+
+`run` รัน shell command บน runner:
+
+- `go build` compile packages และตรวจ compile errors
+- `-v` แสดงชื่อ packages ขณะ build
+- `./...` หมายถึงทุก Go package ใน module และโฟลเดอร์ย่อย
+
+สำหรับ packages ที่ไม่ใช่ executable คำสั่งนี้ตรวจว่า compile ได้ แต่ไม่สร้าง binary ที่นำไปใช้งานถาวร
+
+#### Test
+
+```yaml
+- name: Test
+  run: go test -v ./...
+```
+
+- `go test` compile test binary และรัน tests
+- `-v` แสดงชื่อและผลของแต่ละ test
+- `./...` รัน tests ทุก package ใน module
+
+หาก test ใดล้มเหลว command จะคืน exit code ที่ไม่ใช่ `0` ทำให้ step และ workflow ล้มเหลว GitHub จึงสามารถใช้ workflow นี้เป็น required status check ก่อน merge Pull Request ได้
+
+### `uses` เทียบกับ `run`
+
+| รูปแบบ | หน้าที่ | ตัวอย่าง |
+| --- | --- | --- |
+| `uses` | เรียก Action ที่มีผู้อื่นหรือโปรเจกต์เตรียมไว้ | `actions/checkout@v4` |
+| `run` | รัน shell command โดยตรงบน runner | `go test -v ./...` |
+
+### ปัญหาใน Workflow ปัจจุบัน
+
+#### Go Version ไม่ตรงกับ `go.mod`
+
+Workflow ขอ Go 1.20:
+
+```yaml
+go-version: "1.20"
+```
+
+แต่ `go.mod` ของโปรเจกต์ระบุ:
+
+```go
+go 1.26.4
+```
+
+Go toolchain ใน CI ต้องรองรับเวอร์ชันที่ module กำหนด มิฉะนั้น build หรือ test อาจหยุดตั้งแต่การอ่าน `go.mod` ควรให้ workflow ใช้เวอร์ชันเดียวกับโปรเจกต์ หรืออ่านจาก `go.mod` โดยตรง:
+
+```yaml
+- name: Set up Go
+  uses: actions/setup-go@v4
+  with:
+    go-version-file: go.mod
+```
+
+การมี source of truth ที่ `go.mod` ช่วยลดโอกาสแก้ Go version ในจุดหนึ่งแล้วลืมแก้อีกจุด
+
+#### Integration Tests ยังไม่มี PostgreSQL
+
+Tests ใน `db/sqlc` เชื่อมต่อ:
+
+```text
+postgresql://root:secret@localhost:5432/simple_bank?sslmode=disable
+```
+
+แต่ runner ใหม่ไม่มี PostgreSQL database และ schema ของโปรเจกต์พร้อมใช้งานโดยอัตโนมัติ Workflow จึงต้องทำอย่างน้อยสามอย่างก่อน `go test`:
+
+1. เริ่ม PostgreSQL service ที่มี user, password และ database ตรงกับ test configuration
+2. รอจน PostgreSQL พร้อมรับ connection
+3. apply migrations จาก `db/migration`
+
+ตัวอย่างเพิ่ม PostgreSQL service ใน job:
+
+```yaml
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: root
+          POSTGRES_PASSWORD: secret
+          POSTGRES_DB: simple_bank
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U root -d simple_bank"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+```
+
+Service นี้สร้าง database เปล่าเท่านั้น ยังต้องติดตั้งหรือเรียก migration tool แล้วรัน migrations ก่อน test
+
+### Workflow ที่สมบูรณ์ควรมีลำดับอย่างไร
+
+```text
+Trigger: push/PR เข้า main
+             │
+             ▼
+สร้าง Ubuntu runner + PostgreSQL service
+             │
+             ▼
+Checkout repository
+             │
+             ▼
+Setup Go จาก go.mod
+             │
+             ▼
+ดาวน์โหลด dependencies / build
+             │
+             ▼
+Apply database migrations
+             │
+             ▼
+Run tests
+             │
+      ┌──────┴──────┐
+      ▼             ▼
+   Success        Failure
+   check ผ่าน     check ไม่ผ่าน
+```
+
+สรุป: `ci.yml` ทำหน้าที่ตรวจว่า source code บน `main` และ Pull Requests ที่จะเข้า `main` ยัง build และ test ผ่าน แต่ workflow ปัจจุบันควรปรับ Go version ให้ตรง `go.mod` และเตรียม PostgreSQL พร้อม migrations ก่อน integration tests จึงจะทำงานครบถ้วน
