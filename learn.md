@@ -19,8 +19,10 @@
 8. [Testify](#8-testify)
 9. [TestMain และ Test Lifecycle](#9-testmain-และ-test-lifecycle)
 10. [การสร้างข้อมูลสุ่มสำหรับ Tests](#10-การสร้างข้อมูลสุ่มสำหรับ-tests)
-11. [Test Coverage](#11-test-coverage)
-   - [Unit Test ของ HTTP Handler ด้วย GoMock และ httptest](#unit-test-ของ-http-handler-ด้วย-gomock-และ-httptest)
+11. [Testing Strategy, HTTP Handler และ Coverage](#11-testing-strategy-http-handler-และ-coverage)
+    - [Testing Strategy: Unit Test และ Integration Test](#testing-strategy-unit-test-และ-integration-test)
+    - [HTTP Handler Unit Testing](#http-handler-unit-testing-ด้วย-gomock-และ-httptest)
+    - [Test Coverage](#test-coverage)
 12. [Struct, Interface, Context และ Dependency Injection](#12-struct-interface-context-และ-dependency-injection)
 13. [GitHub Actions และ CI Workflow](#13-github-actions-และ-ci-workflow)
 
@@ -1835,42 +1837,9 @@ n := -(rand.IntN(10) + 1)
 
 สำหรับโปรเจกต์ที่ใช้ `math/rand` ให้ใช้ `Int63n` ส่วนโปรเจกต์ใหม่ที่เลือกใช้ `math/rand/v2` สามารถใช้ `Int64N` ได้ ทั้งสองฟังก์ชันไม่เหมาะกับข้อมูลด้านความปลอดภัย เช่น password หรือ token ซึ่งควรใช้ `crypto/rand` แทน
 
-## 11. Test Coverage
+## 11. Testing Strategy, HTTP Handler และ Coverage
 
-ใช้คำสั่งต่อไปนี้เพื่อรัน tests ทุก package พร้อมแสดงรายละเอียดและวัด test coverage:
-
-```bash
-go test -v -cover ./...
-```
-
-ความหมายของแต่ละส่วน:
-
-- `go test` compile และรัน tests
-- `-v` หรือ verbose แสดงชื่อและผลของแต่ละ test
-- `-cover` แสดงเปอร์เซ็นต์ของ statements ที่ถูก execute ระหว่างการทดสอบ
-- `./...` เลือก package ในตำแหน่งปัจจุบันและทุก package ในโฟลเดอร์ย่อย
-
-ตัวอย่างผลลัพธ์:
-
-```text
-=== RUN   TestCreateAccount
---- PASS: TestCreateAccount (0.01s)
-PASS
-coverage: 72.5% of statements
-ok   github.com/MumAroi/go-simplebank/db/sqlc
-```
-
-ค่า coverage หมายถึงสัดส่วน statements ที่ tests รันผ่าน ไม่ได้ยืนยันว่าโปรแกรมถูกต้องตามเปอร์เซ็นต์นั้น
-
-`PASS` กับ coverage วัดคนละเรื่อง:
-
-- `PASS` หมายถึง test cases ที่รันไม่มี assertion ล้มเหลวหรือ panic
-- coverage `72.5%` หมายถึง test วิ่งผ่านประมาณ 72.5% ของ statements ที่นำมาวัด
-- methods หรือ branches ที่ไม่มี test เรียกยังลด coverage ได้ แม้ tests ที่มีอยู่จะผ่านทั้งหมด
-
-ดังนั้น coverage สูงไม่ได้รับประกันว่า test ดี เพราะ test อาจเรียก statement โดยไม่ได้ตรวจผลลัพธ์สำคัญ ควรมี assertions ตรวจทั้ง error และค่าที่คืนมา
-
-### Unit Test เทียบกับ Integration Test
+### Testing Strategy: Unit Test และ Integration Test
 
 Unit test และ integration test ตรวจคนละส่วนของระบบ จึงควรเลือก implementation ให้ตรงกับสิ่งที่ต้องการทดสอบ
 
@@ -1922,7 +1891,7 @@ sqlc Queries ─── integration test ด้วย PostgreSQL จริง
 
 ถ้า service แค่ส่งต่อไปยัง store โดยไม่มี business logic unit test อาจให้ประโยชน์ไม่มาก แต่เมื่อมี validation, authorization หรือการแปลง error ควรมี unit tests สำหรับแต่ละกรณี ส่วน database query ควรมี integration test แยกต่างหาก ระบบหนึ่งจึงสามารถและมักควรมีทั้งสองแบบ
 
-### Unit Test ของ HTTP Handler ด้วย GoMock และ `httptest`
+### HTTP Handler Unit Testing ด้วย GoMock และ `httptest`
 
 `api/account_test.go` ทดสอบ route `GET /accounts/:id` โดยรัน Gin handler จริง แต่ใช้ `MockStore` แทน PostgreSQL:
 
@@ -2069,7 +2038,106 @@ TestGetAccount/InvalidID
 
 GoMock รุ่นใหม่ลงทะเบียน cleanup กับ `testing.T` ได้เมื่อสร้าง Controller ดังนั้น `defer ctrl.Finish()` อาจไม่จำเป็น แต่ยังใช้ได้และช่วยสื่อจุดสิ้นสุดของการตรวจ expectations
 
-#### `ResponseRecorder` และการตรวจ JSON Body
+#### `httptest.NewRecorder()` สร้างที่เก็บ Response
+
+```go
+recorder := httptest.NewRecorder()
+```
+
+บรรทัดนี้สร้าง `*httptest.ResponseRecorder` ซึ่ง implement `http.ResponseWriter` เพื่อรับและบันทึก response จาก handler แทน client/network จริง
+
+```text
+Handler เขียน response
+        │
+        ▼
+ResponseRecorder
+├── Code   เก็บ HTTP status
+├── Header เก็บ response headers
+└── Body   เก็บ response body
+```
+
+การสร้าง recorder เพียงอย่างเดียวยังไม่ได้สร้าง request, เปิด server หรือเรียก handler มันเป็นเพียงพื้นที่สำหรับรับผลลัพธ์เมื่อ `ServeHTTP` ทำงาน
+
+ข้อมูลหลักที่อ่านได้:
+
+```go
+recorder.Code                    // เช่น 200, 400, 404, 500
+recorder.Header().Get("Content-Type")
+recorder.Body.String()           // response body
+response := recorder.Result()    // แปลงเป็น *http.Response
+```
+
+#### `http.NewRequest()` สร้าง Request ใน Memory
+
+```go
+request, err := http.NewRequest(
+    http.MethodGet,
+    "/accounts/10",
+    nil,
+)
+```
+
+บรรทัดนี้สร้าง `*http.Request` เท่านั้น ยังไม่ได้ยิง request หรือเรียก handler:
+
+- `http.MethodGet` คือ HTTP method
+- `"/accounts/10"` คือ path ที่ router จะใช้จับคู่
+- `nil` หมายถึง request ไม่มี body
+- `err` อาจเกิดเมื่อ URL ไม่ถูกต้อง
+
+เชิงแนวคิดเป็นการเตรียมข้อมูลนี้ไว้ใน memory:
+
+```http
+GET /accounts/10
+```
+
+ถ้าต้องการยิงผ่าน network จริงต้องใช้ `http.Client.Do(request)` และ URL เต็ม เช่น `http://localhost:8081/accounts/10` แต่ unit test นี้ไม่ใช้ network
+
+#### `router.ServeHTTP()` รัน Router และ Handler
+
+```go
+server.router.ServeHTTP(recorder, request)
+```
+
+บรรทัดนี้เป็นจุดที่ request เริ่มถูกประมวลผล โดยส่ง request เข้า Gin router โดยตรงใน process เดียวกัน:
+
+```text
+request: GET /accounts/10
+          │
+          ▼
+Gin router จับคู่ GET /accounts/:id
+          │
+          ▼
+สร้าง *gin.Context และอ่าน id = 10
+          │
+          ▼
+เรียก server.getAccount(ctx)
+          │
+          ▼
+handler เรียก MockStore.GetAccount(...)
+          │
+          ▼
+handler เขียน status/header/JSON
+          │
+          ▼
+recorder เก็บ response
+```
+
+`ServeHTTP` มีรูปแบบตามมาตรฐาน `http.Handler`:
+
+```go
+ServeHTTP(writer http.ResponseWriter, request *http.Request)
+```
+
+ดังนั้น `recorder` ทำหน้าที่เป็น writer ปลอม ส่วน `request` เป็น input การเรียกนี้ไม่เปิด TCP port และไม่ต้องเรียก `server.Start()`
+
+เปรียบเทียบ:
+
+| รูปแบบ | ใช้ Network | ต้องเปิด Port | เหมาะกับ |
+| --- | --- | --- | --- |
+| `router.ServeHTTP(recorder, request)` | ไม่ใช้ | ไม่ต้อง | Unit test ของ handler/router |
+| `http.Client.Do(request)` | ใช้ | ต้อง | End-to-end หรือ network test |
+
+#### การตรวจ Response และ JSON Body
 
 `httptest.ResponseRecorder` เก็บข้อมูลที่ handler เขียนออกมา:
 
@@ -2126,6 +2194,43 @@ SQL และ PostgreSQL ควรมี integration tests แยกใน packa
 ```text
 ? github.com/MumAroi/go-simplebank/somepackage [no test files]
 ```
+
+### Test Coverage
+
+หัวข้อนี้อธิบายคำสั่งพื้นฐาน การอ่านรายงาน และแนวทางเพิ่ม coverage อย่างมีคุณภาพ
+
+ใช้คำสั่งต่อไปนี้เพื่อรัน tests ทุก package พร้อมแสดงรายละเอียดและวัด test coverage:
+
+```bash
+go test -v -cover ./...
+```
+
+ความหมายของแต่ละส่วน:
+
+- `go test` compile และรัน tests
+- `-v` หรือ verbose แสดงชื่อและผลของแต่ละ test
+- `-cover` แสดงเปอร์เซ็นต์ของ statements ที่ถูก execute ระหว่างการทดสอบ
+- `./...` เลือก package ในตำแหน่งปัจจุบันและทุก package ในโฟลเดอร์ย่อย
+
+ตัวอย่างผลลัพธ์:
+
+```text
+=== RUN   TestCreateAccount
+--- PASS: TestCreateAccount (0.01s)
+PASS
+coverage: 72.5% of statements
+ok   github.com/MumAroi/go-simplebank/db/sqlc
+```
+
+ค่า coverage หมายถึงสัดส่วน statements ที่ tests รันผ่าน ไม่ได้ยืนยันว่าโปรแกรมถูกต้องตามเปอร์เซ็นต์นั้น
+
+`PASS` กับ coverage วัดคนละเรื่อง:
+
+- `PASS` หมายถึง test cases ที่รันไม่มี assertion ล้มเหลวหรือ panic
+- coverage `72.5%` หมายถึง test วิ่งผ่านประมาณ 72.5% ของ statements ที่นำมาวัด
+- methods หรือ branches ที่ไม่มี test เรียกยังลด coverage ได้ แม้ tests ที่มีอยู่จะผ่านทั้งหมด
+
+ดังนั้น coverage สูงไม่ได้รับประกันว่า test ดี เพราะ test อาจเรียก statement โดยไม่ได้ตรวจผลลัพธ์สำคัญ ควรมี assertions ตรวจทั้ง error และค่าที่คืนมา
 
 ### ความหมายของ `./...`
 
