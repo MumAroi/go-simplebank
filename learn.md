@@ -20,6 +20,7 @@
 9. [TestMain และ Test Lifecycle](#9-testmain-และ-test-lifecycle)
 10. [การสร้างข้อมูลสุ่มสำหรับ Tests](#10-การสร้างข้อมูลสุ่มสำหรับ-tests)
 11. [Test Coverage](#11-test-coverage)
+   - [Unit Test ของ HTTP Handler ด้วย GoMock และ httptest](#unit-test-ของ-http-handler-ด้วย-gomock-และ-httptest)
 12. [Struct, Interface, Context และ Dependency Injection](#12-struct-interface-context-และ-dependency-injection)
 13. [GitHub Actions และ CI Workflow](#13-github-actions-และ-ci-workflow)
 
@@ -1920,6 +1921,205 @@ sqlc Queries ─── integration test ด้วย PostgreSQL จริง
 ```
 
 ถ้า service แค่ส่งต่อไปยัง store โดยไม่มี business logic unit test อาจให้ประโยชน์ไม่มาก แต่เมื่อมี validation, authorization หรือการแปลง error ควรมี unit tests สำหรับแต่ละกรณี ส่วน database query ควรมี integration test แยกต่างหาก ระบบหนึ่งจึงสามารถและมักควรมีทั้งสองแบบ
+
+### Unit Test ของ HTTP Handler ด้วย GoMock และ `httptest`
+
+`api/account_test.go` ทดสอบ route `GET /accounts/:id` โดยรัน Gin handler จริง แต่ใช้ `MockStore` แทน PostgreSQL:
+
+```text
+HTTP Request: GET /accounts/123
+              │
+              ▼
+          Gin Router
+              │
+              ▼
+       getAccount handler
+              │
+              ▼
+      MockStore.GetAccount
+              │
+              ▼
+      HTTP Status และ JSON Body
+```
+
+Test นี้ตรวจ validation, error mapping และ response serialization ของ API โดยไม่ตรวจ SQL หรือ database จึงเป็น unit test ของ HTTP layer
+
+#### ข้อมูลทดสอบและ Table-driven Test
+
+เริ่มจากสร้าง account ใน memory โดยไม่ได้บันทึกลงฐานข้อมูล:
+
+```go
+account := randomAccount()
+```
+
+จากนั้นประกาศตารางของกรณีทดสอบ:
+
+```go
+testCases := []struct {
+    name          string
+    accountID     int64
+    buildStubs    func(store *mockdb.MockStore)
+    checkResponse func(t *testing.T, recorder *httptest.ResponseRecorder)
+}{
+    // test cases
+}
+```
+
+- `name` คือชื่อ subtest
+- `accountID` คือ ID ที่นำไปสร้าง URL
+- `buildStubs` กำหนด expectation และค่าที่ MockStore ต้องคืน
+- `checkResponse` ตรวจ HTTP status และ response body
+
+Table-driven test ช่วยใช้ขั้นตอน setup และส่ง request ชุดเดียวกันกับหลายสถานการณ์ แทนการสร้าง test function แยกที่มีโค้ดซ้ำ
+
+#### กรณีที่ทดสอบ
+
+| กรณี | MockStore คืนค่า | เรียก Store | Response ที่คาดหวัง |
+| --- | --- | --- | --- |
+| `OK` | `account, nil` | 1 ครั้ง | `200 OK` และ account JSON |
+| `NotFound` | `db.Account{}, sql.ErrNoRows` | 1 ครั้ง | `404 Not Found` |
+| `InternalError` | `db.Account{}, sql.ErrConnDone` | 1 ครั้ง | `500 Internal Server Error` |
+| `InvalidID` | ไม่ได้คืนค่า | 0 ครั้ง | `400 Bad Request` |
+
+กรณี `InvalidID` ใช้ ID เป็น `0` ซึ่งไม่ผ่าน validation นี้:
+
+```go
+type getAccountRequest struct {
+    ID int64 `uri:"id" binding:"required,min=1"`
+}
+```
+
+Handler จึงต้องตอบ `400` ก่อนเรียก Store และ test ยืนยันด้วย `Times(0)`
+
+#### การกำหนดพฤติกรรมของ MockStore
+
+กรณีสำเร็จกำหนด expectation ดังนี้:
+
+```go
+store.EXPECT().
+    GetAccount(gomock.Any(), gomock.Eq(account.ID)).
+    Times(1).
+    Return(account, nil)
+```
+
+- `EXPECT()` เริ่มบันทึกสิ่งที่คาดจาก mock
+- `GetAccount(...)` คือ method ที่ handler ต้องเรียก
+- `gomock.Any()` ยอมรับ Context ค่าใดก็ได้
+- `gomock.Eq(account.ID)` บังคับให้ ID ตรงกับค่าที่คาด
+- `Times(1)` ต้องถูกเรียกหนึ่งครั้ง
+- `Return(account, nil)` กำหนดค่าที่ mock คืนให้ handler
+
+ถ้า handler ไม่เรียก method, เรียกเกินจำนวนครั้ง หรือส่ง ID ผิด GoMock จะทำให้ test ล้มเหลว
+
+Mock ช่วยกำหนดสถานการณ์ที่ต้องการได้โดยไม่ต้องทำให้ database เกิด error จริง เช่น:
+
+```go
+store.EXPECT().
+    GetAccount(gomock.Any(), account.ID).
+    Return(db.Account{}, sql.ErrNoRows)
+```
+
+#### การรันแต่ละ Subtest
+
+แต่ละ test case ถูกนำไปรันผ่าน `t.Run`:
+
+```go
+for i := range testCases {
+    tc := testCases[i]
+
+    t.Run(tc.name, func(t *testing.T) {
+        ctrl := gomock.NewController(t)
+        defer ctrl.Finish()
+
+        store := mockdb.NewMockStore(ctrl)
+        tc.buildStubs(store)
+
+        server := NewServer(store)
+        recorder := httptest.NewRecorder()
+
+        url := fmt.Sprintf("/accounts/%d", tc.accountID)
+        request, err := http.NewRequest(http.MethodGet, url, nil)
+        require.NoError(t, err)
+
+        server.router.ServeHTTP(recorder, request)
+        tc.checkResponse(t, recorder)
+    })
+}
+```
+
+จะได้ subtests เช่น:
+
+```text
+TestGetAccount/OK
+TestGetAccount/NotFound
+TestGetAccount/InternalError
+TestGetAccount/InvalidID
+```
+
+หน้าที่ของแต่ละส่วน:
+
+1. `gomock.NewController(t)` จัดการ calls และตรวจ expectations ของ mock
+2. `mockdb.NewMockStore(ctrl)` สร้าง Store ปลอมที่ implement `db.Store`
+3. `tc.buildStubs(store)` กำหนดพฤติกรรมของ mock สำหรับกรณีนั้น
+4. `NewServer(store)` inject mock เข้า Server แทน `SQLStore`
+5. `httptest.NewRecorder()` รับ response แทน HTTP client จริง
+6. `http.NewRequest(...)` สร้าง request โดยไม่ต้องเปิด network port
+7. `ServeHTTP(...)` ส่ง request ผ่าน Gin router และ handler จริง
+8. `tc.checkResponse(...)` ตรวจผลลัพธ์
+
+GoMock รุ่นใหม่ลงทะเบียน cleanup กับ `testing.T` ได้เมื่อสร้าง Controller ดังนั้น `defer ctrl.Finish()` อาจไม่จำเป็น แต่ยังใช้ได้และช่วยสื่อจุดสิ้นสุดของการตรวจ expectations
+
+#### `ResponseRecorder` และการตรวจ JSON Body
+
+`httptest.ResponseRecorder` เก็บข้อมูลที่ handler เขียนออกมา:
+
+```go
+recorder.Code   // HTTP status code
+recorder.Body   // response body
+recorder.Header()
+```
+
+กรณี `OK` ตรวจ status และ account ใน body:
+
+```go
+require.Equal(t, http.StatusOK, recorder.Code)
+requireBodyMatchAccount(t, recorder.Body, account)
+```
+
+Helper อ่าน JSON แล้วแปลงกลับเป็น struct:
+
+```go
+func requireBodyMatchAccount(
+    t *testing.T,
+    body *bytes.Buffer,
+    account db.Account,
+) {
+    data, err := io.ReadAll(body)
+    require.NoError(t, err)
+
+    var gotAccount db.Account
+    err = json.Unmarshal(data, &gotAccount)
+    require.NoError(t, err)
+
+    require.Equal(t, account, gotAccount)
+}
+```
+
+การเปรียบเทียบ struct เหมาะกว่าการเปรียบเทียบ JSON string โดยตรง เพราะ whitespace และลำดับการจัดรูปแบบ JSON อาจต่างกันแม้ข้อมูลมีความหมายเดียวกัน
+
+#### ขอบเขตของ Test นี้
+
+```text
+สิ่งที่ทดสอบ                         สิ่งที่ไม่ได้ทดสอบ
+────────────────────────────────────────────────────────
+Gin route และ URI binding           SQL query
+Validation ของ account ID           PostgreSQL connection
+การเรียก Store ด้วย ID ที่ถูกต้อง    sqlc generated code
+การแปลง Store error เป็น HTTP status Transaction และ locking
+JSON response                        Migration
+```
+
+SQL และ PostgreSQL ควรมี integration tests แยกใน package `db/sqlc` ส่วน test นี้เน้นว่า API ใช้ `db.Store` contract อย่างถูกต้อง
 
 หาก package ไม่มีไฟล์ test จะแสดงประมาณนี้:
 
