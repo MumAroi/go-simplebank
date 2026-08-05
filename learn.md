@@ -1,496 +1,144 @@
-# Go Simple Bank — Learning Notes
+# Go Simple Bank — Learning Notes ฉบับย่อ
 
-เอกสารนี้รวบรวมความรู้ที่ใช้สร้างโปรเจกต์ Go Simple Bank ตั้งแต่ database migration, transaction, `sqlc`, พื้นฐานภาษา Go ไปจนถึงการทดสอบและการออกแบบ dependencies
+เอกสารนี้สรุปแนวคิดสำคัญของโปรเจกต์ SimpleBank โดยเรียงจากฐานข้อมูลไปถึง API, tests และ CI
 
 ## สารบัญ
 
-1. [Database Migration](#1-database-migration)
-2. [Database Transaction และ ACID](#2-database-transaction-และ-acid)
-   - [Deadlock: สาเหตุ การวิเคราะห์ และวิธีแก้](#deadlock-guide)
-3. [การตั้งค่า sqlc](#3-การตั้งค่า-sqlc)
-4. [การทำงานของ sqlc generate](#4-การทำงานของ-sqlc-generate)
-5. [พื้นฐานภาษา Go](#5-พื้นฐานภาษา-go)
-   - [Boilerplate](#boilerplate-คืออะไร)
-   - [`int` และ `int64`](#int-และ-int64)
-   - [Pointer](#pointer)
-   - [Goroutine และ Concurrency](#goroutine-และ-concurrency)
-6. [Method Receiver เทียบกับ TypeScript](#6-method-receiver-เทียบกับ-typescript)
-7. [พื้นฐานการรัน Go Tests](#7-พื้นฐานการรัน-go-tests)
-8. [Testify](#8-testify)
-9. [TestMain และ Test Lifecycle](#9-testmain-และ-test-lifecycle)
-10. [การสร้างข้อมูลสุ่มสำหรับ Tests](#10-การสร้างข้อมูลสุ่มสำหรับ-tests)
-11. [Testing Strategy, HTTP Handler และ Coverage](#11-testing-strategy-http-handler-และ-coverage)
-    - [Testing Strategy: Unit Test และ Integration Test](#testing-strategy-unit-test-และ-integration-test)
-    - [HTTP Handler Unit Testing](#http-handler-unit-testing-ด้วย-gomock-และ-httptest)
-    - [Test Coverage](#test-coverage)
-12. [Struct, Interface, Context และ Dependency Injection](#12-struct-interface-context-และ-dependency-injection)
-13. [GitHub Actions และ CI Workflow](#13-github-actions-และ-ci-workflow)
+1. [ภาพรวมระบบ](#1-ภาพรวมระบบ)
+2. [Migration และ PostgreSQL](#2-migration-และ-postgresql)
+3. [Transaction, ACID และ Deadlock](#3-transaction-acid-และ-deadlock)
+4. [sqlc](#4-sqlc)
+5. [Store, Interface และ Dependency Injection](#5-store-interface-และ-dependency-injection)
+6. [พื้นฐาน Go ที่ใช้บ่อย](#6-พื้นฐาน-go-ที่ใช้บ่อย)
+7. [Context](#7-context)
+8. [Testing](#8-testing)
+9. [GoMock และ HTTP Handler Test](#9-gomock-และ-http-handler-test)
+10. [Coverage](#10-coverage)
+11. [GitHub Actions และ CI](#11-github-actions-และ-ci)
+12. [คำสั่งที่ใช้บ่อย](#12-คำสั่งที่ใช้บ่อย)
 
-> แนะนำให้อ่านตามลำดับบท โดยบทที่ 1–4 เน้นฐานข้อมูลและ generated code, บทที่ 5–6 เน้น syntax ของ Go, บทที่ 7–11 เน้น testing และบทที่ 12 เชื่อมแนวคิดด้านการออกแบบ application เข้าด้วยกัน
+## 1. ภาพรวมระบบ
 
-## 1. Database Migration
+โครงสร้างหลักของโปรเจกต์:
 
-### การสร้างไฟล์ Migration
+```text
+HTTP Client
+    ↓
+Gin Handler
+    ↓
+Store interface
+    ↓
+SQLStore
+    ↓
+sqlc Queries
+    ↓
+PostgreSQL
+```
 
-ใช้คำสั่งต่อไปนี้เพื่อสร้างไฟล์ migration สำหรับโครงสร้างฐานข้อมูลเริ่มต้น:
+- Gin รับ request, validate input และสร้าง response
+- `Store` กำหนดความสามารถที่ API ใช้
+- `SQLStore` ทำงานกับ PostgreSQL จริง
+- sqlc สร้าง Go methods จาก SQL
+- PostgreSQL เก็บข้อมูลและควบคุม transaction
+
+ตอน unit test เปลี่ยน `SQLStore` เป็น `MockStore` ได้:
+
+```text
+Gin Handler → MockStore → ค่าที่ test กำหนด
+```
+
+## 2. Migration และ PostgreSQL
+
+Migration ใช้บันทึกการเปลี่ยนแปลง schema เป็นลำดับ:
+
+```text
+000001_init_schema.up.sql   → ใช้เพิ่มหรือแก้ schema
+000001_init_schema.down.sql → ใช้ย้อนการเปลี่ยนแปลง
+```
+
+สร้าง migration:
 
 ```bash
 migrate create -ext sql -dir db/migration -seq init_schema
 ```
 
-ความหมายของแต่ละส่วน:
-
-- `migrate create` สั่ง CLI ของ `golang-migrate` ให้สร้าง migration ใหม่
-- `-ext sql` กำหนดนามสกุลของไฟล์เป็น `.sql`
-- `-dir db/migration` กำหนดให้สร้างไฟล์ในโฟลเดอร์ `db/migration`
-- `-seq` ใช้เลขลำดับเป็นเวอร์ชัน เช่น `000001`, `000002`
-- `init_schema` คือชื่อ migration ซึ่งสื่อว่าใช้สร้างโครงสร้างฐานข้อมูลเริ่มต้น
-
-เมื่อรันคำสั่ง จะได้ไฟล์สองไฟล์:
-
-```text
-db/migration/
-├── 000001_init_schema.up.sql
-└── 000001_init_schema.down.sql
-```
-
-- `000001_init_schema.up.sql` ใช้สำหรับนำการเปลี่ยนแปลงไปใช้ เช่น `CREATE TABLE`
-- `000001_init_schema.down.sql` ใช้สำหรับย้อนกลับการเปลี่ยนแปลง เช่น `DROP TABLE`
-
-ตัวอย่างเนื้อหาไฟล์ `up.sql`:
+ตัวอย่าง:
 
 ```sql
+-- up
 CREATE TABLE accounts (
     id BIGSERIAL PRIMARY KEY,
     owner VARCHAR NOT NULL,
-    balance BIGINT NOT NULL
+    balance BIGINT NOT NULL CHECK (balance >= 0)
 );
-```
 
-ตัวอย่างเนื้อหาไฟล์ `down.sql`:
-
-```sql
+-- down
 DROP TABLE accounts;
 ```
 
-สรุป: คำสั่งนี้สร้าง migration ชื่อ `init_schema` พร้อมไฟล์สำหรับดำเนินการเปลี่ยนแปลง (`up`) และย้อนกลับการเปลี่ยนแปลง (`down`)
+รันและย้อน migration:
 
-## 2. Database Transaction และ ACID
+```bash
+make migrateup
+make migratedown
+```
 
-Transaction คือการรวม SQL operations หลายรายการให้เป็นงานหนึ่งชุด โดยต้องสำเร็จทั้งหมดหรือยกเลิกทั้งหมด
+หลักสำคัญ:
 
-ตัวอย่างการโอนเงินจากบัญชี A ไปบัญชี B ประกอบด้วยหลาย operation:
+- `up` และ `down` ควรเป็นคู่กัน
+- schema ที่ทุก environment ใช้ควรมาจาก migration
+- Constraints เช่น PK, FK และ `CHECK` ควรบังคับในฐานข้อมูลเมื่อทำได้
+
+## 3. Transaction, ACID และ Deadlock
+
+Transaction รวมหลาย SQL operations ให้เป็นงานเดียว:
 
 ```text
-1. สร้างรายการโอน
-2. หักเงินจากบัญชี A
-3. เพิ่มเงินให้บัญชี B
-4. บันทึกรายการเงินออกและเงินเข้า
+สำเร็จทั้งหมด → COMMIT
+ผิดพลาดบางส่วน → ROLLBACK ทั้งหมด
 ```
 
-ถ้าหักเงินจาก A สำเร็จ แต่เพิ่มเงินให้ B ล้มเหลว ระบบต้องย้อนการเปลี่ยนแปลงทั้งหมด ไม่เช่นนั้นข้อมูลจะอยู่ในสถานะไม่สมบูรณ์
+### ACID
 
-รูปแบบ SQL พื้นฐาน:
+- Atomicity — สำเร็จทั้งหมดหรือไม่เกิดการเปลี่ยนแปลงเลย
+- Consistency — ข้อมูลยังถูกต้องตาม constraints และ business rules
+- Isolation — transactions ที่ทำพร้อมกันไม่รบกวนกันอย่างผิดพลาด
+- Durability — commit แล้วข้อมูลต้องคงอยู่
 
-```sql
-BEGIN;
+### Isolation Levels
 
-UPDATE accounts
-SET balance = balance - 100
-WHERE id = 1;
+| ระดับ | พฤติกรรมโดยย่อ | ข้อควรระวัง |
+| --- | --- | --- |
+| Read Uncommitted | PostgreSQL ทำงานเหมือน Read Committed | ไม่ได้อ่านข้อมูลที่ยังไม่ commit |
+| Read Committed | snapshot ใหม่ทุก statement | อ่านซ้ำอาจเห็นค่าใหม่ |
+| Repeatable Read | snapshot เดิมตลอด transaction | อาจ conflict และต้อง retry |
+| Serializable | ผลเสมือนทำ transactions ทีละตัว | อาจเกิด `40001` และต้อง retry |
 
-UPDATE accounts
-SET balance = balance + 100
-WHERE id = 2;
+PostgreSQL ใช้ `Read Committed` เป็นค่าเริ่มต้น
 
-COMMIT;
-```
+ปัญหาที่พบบ่อย:
 
-- `BEGIN` เริ่ม transaction
-- `COMMIT` ยืนยันการเปลี่ยนแปลงทั้งหมด
-- `ROLLBACK` ย้อนการเปลี่ยนแปลงทั้งหมดใน transaction
+- Dirty Read — อ่านข้อมูลที่ยังไม่ commit
+- Non-repeatable Read — อ่านแถวเดิมซ้ำแล้วได้ค่าต่างกัน
+- Phantom Read — query เงื่อนไขเดิมซ้ำแล้วได้ชุดแถวต่างกัน
+- Lost Update — update หนึ่งเขียนทับผลของอีก transaction
+- Write Skew — แต่ละ transaction ดูถูกต้อง แต่ผลรวมผิด business rule
 
-หาก operation ใดล้มเหลว application ควรสั่ง:
-
-```sql
-ROLLBACK;
-```
-
-### ACID Properties
-
-ACID คือคุณสมบัติสี่ข้อที่ช่วยให้ transaction เชื่อถือได้
-
-#### Atomicity — สำเร็จทั้งหมดหรือไม่เกิดขึ้นเลย
-
-ทุก operation ใน transaction ถูกมองเป็นหน่วยเดียว:
-
-```text
-หัก A สำเร็จ + เพิ่ม B สำเร็จ  ──> COMMIT
-หัก A สำเร็จ + เพิ่ม B ล้มเหลว ──> ROLLBACK ทั้งหมด
-```
-
-จึงไม่ควรเกิดสถานะที่บัญชีต้นทางถูกหักเงิน แต่บัญชีปลายทางไม่ได้รับเงิน
-
-#### Consistency — ข้อมูลยังรักษากฎของระบบ
-
-ก่อนและหลัง transaction ข้อมูลต้องอยู่ในสถานะที่ถูกต้องตาม database constraints และ business rules ที่ application บังคับใช้ เช่น:
-
-- Primary Key ต้องไม่ซ้ำ
-- Foreign Key ต้องอ้างถึงข้อมูลที่มีอยู่
-- ค่า currency ต้องอยู่ในชุดที่ระบบรองรับ
-- เงินรวมก่อนและหลังการโอนควรเท่าเดิม
-- หากไม่อนุญาตยอดติดลบ balance ต้องไม่น้อยกว่า `0`
-
-กฎบางส่วนควรบังคับด้วย constraint ในฐานข้อมูล:
-
-```sql
-balance BIGINT NOT NULL CHECK (balance >= 0)
-```
-
-ฐานข้อมูลรับประกัน constraints ที่ประกาศไว้ แต่ business rules ที่ไม่ได้เขียนเป็น constraint ยังเป็นความรับผิดชอบของ application
-
-#### Isolation — Transactions ที่ทำพร้อมกันไม่รบกวนกันอย่างผิดพลาด
-
-หากสอง transactions อ่านและแก้ไขบัญชีเดียวกันพร้อมกัน อาจเกิดปัญหา เช่น lost update หรือใช้เงินเกินยอด ฐานข้อมูลจึงใช้ snapshot, isolation level และ locking เพื่อควบคุม concurrency
-
-ตัวอย่างล็อกแถวก่อนแก้ไข:
-
-```sql
-SELECT *
-FROM accounts
-WHERE id = $1
-FOR UPDATE;
-```
-
-ปัญหาจาก concurrency ที่ควรรู้:
-
-- Dirty Read คืออ่านข้อมูลที่ transaction อื่นยังไม่ commit และอาจ rollback ภายหลัง
-- Non-repeatable Read คืออ่านแถวเดิมสองครั้งใน transaction เดียวกันแต่ได้ค่าต่างกัน
-- Phantom Read คือรัน query ด้วยเงื่อนไขเดิมซ้ำ แต่จำนวนหรือชุดของแถวเปลี่ยนไป
-- Lost Update คือหลาย transactions คำนวณจากค่าเก่าเดียวกัน แล้ว update หนึ่งเขียนทับอีกอัน
-- Write Skew คือ transactions อ่าน snapshot ที่ดูถูกต้องและแก้คนละแถว แต่ผลรวมหลัง commit ผิด business invariant
-
-PostgreSQL รองรับชื่อ isolation levels ตามมาตรฐาน SQL สี่ระดับ แต่ `Read Uncommitted` ทำงานเหมือน `Read Committed`
-
-##### Read Uncommitted
-
-ตามมาตรฐาน SQL ระดับนี้อนุญาตให้ transaction หนึ่งอ่านข้อมูลที่ transaction อื่นแก้ไขแล้วแต่ยังไม่ได้ `COMMIT` ข้อมูลนั้นอาจถูก `ROLLBACK` ภายหลัง การอ่านลักษณะนี้เรียกว่า Dirty Read
-
-ตัวอย่างข้อมูลเริ่มต้นมี balance เท่ากับ `100`:
-
-```text
-Transaction A                  Transaction B
-─────────────                  ─────────────
-UPDATE balance = 0
-ยังไม่ COMMIT
-                               SELECT balance
-                               อาจอ่านได้ 0 ← Dirty Read
-ROLLBACK
-balance กลับเป็น 100
-```
-
-Transaction B เคยอ่านค่า `0` ที่ไม่เคยถูกบันทึกจริง เพราะ Transaction A ยกเลิกการเปลี่ยนแปลงภายหลัง หาก B นำค่านี้ไปตัดสินใจ อาจปฏิเสธรายการ ส่ง notification หรือสร้างรายงานผิด
-
-อย่างไรก็ตาม PostgreSQL **ไม่อนุญาต Dirty Read** แม้จะระบุ:
-
-```sql
-BEGIN TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-```
-
-PostgreSQL จะให้พฤติกรรมเหมือน `Read Committed` ในตัวอย่างเดิม Transaction B จึงยังเห็น balance ที่ commit ล่าสุดคือ `100` ไม่เห็นค่า `0` ที่ A ยังไม่ได้ commit:
-
-```text
-Transaction A                  Transaction B
-─────────────                  ─────────────
-UPDATE balance = 0
-ยังไม่ COMMIT
-                               SELECT balance
-                               อ่านได้ 100
-ROLLBACK
-```
-
-PostgreSQL ใช้ MVCC เพื่อเก็บ row หลายเวอร์ชันและเลือกแสดงเฉพาะเวอร์ชันที่ transaction มีสิทธิ์มองเห็น:
-
-```text
-accounts row
-├── เวอร์ชันที่ commit แล้ว:     balance = 100
-└── เวอร์ชันที่ยังไม่ commit:   balance = 0
-```
-
-Transaction A เห็นการแก้ไข `0` ของตัวเอง ส่วน transaction อื่นยังเห็นเวอร์ชันที่ commit แล้วคือ `100`
-
-พฤติกรรมจริงใน PostgreSQL:
-
-| ระดับที่ระบุ | พฤติกรรมจริง |
-| --- | --- |
-| `READ UNCOMMITTED` | `READ COMMITTED` |
-| `READ COMMITTED` | `READ COMMITTED` |
-
-ทั้งสองระดับไม่เกิด Dirty Read แต่ยังเกิด Non-repeatable Read และ Phantom Read ได้ เพราะแต่ละ statement ใช้ snapshot ใหม่ PostgreSQL ยอมรับชื่อ `READ UNCOMMITTED` เพื่อความเข้ากันได้กับ SQL standard แต่ให้การรับประกันที่แข็งแรงกว่ามาตรฐานขั้นต่ำ
-
-ใน Go สามารถระบุ `sql.LevelReadUncommitted` ได้ แต่เมื่อใช้ PostgreSQL ผลจะเหมือน `sql.LevelReadCommitted` จึงควรเลือก `Read Committed` โดยตรงเพื่อสื่อพฤติกรรมจริงให้คนอ่านโค้ดเข้าใจชัดเจน
-
-สรุป:
-
-```text
-SQL standard: Read Uncommitted อาจเกิด Dirty Read
-PostgreSQL:    Read Uncommitted ทำงานเหมือน Read Committed
-               และไม่เห็นข้อมูลของ transaction อื่นที่ยังไม่ commit
-```
-
-##### Read Committed
-
-เป็นค่าเริ่มต้นของ PostgreSQL แต่ละ SQL statement จะสร้าง snapshot ใหม่ตอน statement เริ่ม และเห็นเฉพาะข้อมูลที่ commit แล้วก่อน snapshot นั้น:
-
-```text
-Transaction A                  Transaction B
-─────────────                  ─────────────
-SELECT balance → 1000
-                               UPDATE balance = 500
-                               COMMIT
-SELECT balance → 500
-```
-
-Snapshot คือภาพของข้อมูลที่ SQL statement ได้รับอนุญาตให้มองเห็น ณ ตอนที่ statement เริ่มทำงาน ในตัวอย่างนี้ `SELECT` ครั้งแรกสร้าง snapshot ตอน balance ยังเป็น `1000` ส่วน `SELECT` ครั้งที่สองสร้าง snapshot ใหม่หลัง Transaction B commit แล้ว จึงเห็น balance เป็น `500`
-
-```text
-Transaction A
-├── SELECT ครั้งที่ 1 ──> snapshot 1 ──> balance 1000
-└── SELECT ครั้งที่ 2 ──> snapshot 2 ──> balance 500
-```
-
-ถ้า Transaction B สั่ง `UPDATE` แต่ยังไม่ `COMMIT` Transaction A จะยังเห็นค่าเก่า:
-
-```text
-Transaction A                  Transaction B
-─────────────                  ─────────────
-SELECT balance → 1000
-                               UPDATE balance = 500
-                               -- ยังไม่ COMMIT
-SELECT balance → 1000
-```
-
-หาก B rollback ค่า `500` จะถูกยกเลิกและ A จะไม่เคยเห็นค่าชั่วคราวนั้น นี่คือการป้องกัน Dirty Read
-
-คำว่า “เห็นเฉพาะข้อมูลที่ commit แล้ว” หมายถึง changes จาก transaction อื่น ส่วน transaction ยังคงเห็น changes ของตัวเองก่อน commit:
-
-```sql
-BEGIN;
-
-UPDATE accounts
-SET balance = 700
-WHERE id = 1;
-
-SELECT balance FROM accounts WHERE id = 1;
--- transaction นี้เห็น 700 แต่ transaction อื่นยังไม่เห็น
-
-ROLLBACK;
-```
-
-ดังนั้นภายใต้ `Read Committed` การอ่านข้อมูลเดิมสองครั้งใน transaction เดียวกันอาจได้ค่าต่างกัน หากมี transaction อื่น commit การเปลี่ยนแปลงระหว่างสอง statements พฤติกรรมนี้เรียกว่า Non-repeatable Read
-
-จึงป้องกัน Dirty Read แต่ Non-repeatable Read และ Phantom Read ยังเกิดได้ เพราะ statements สองตัวใน transaction เดียวกันอาจเห็นคนละ snapshot
-
-Atomic update ช่วยลดปัญหา Lost Update:
+Atomic update มักปลอดภัยกว่าการอ่านมาคำนวณใน Go:
 
 ```sql
 UPDATE accounts
-SET balance = balance + 100
-WHERE id = 1;
+SET balance = balance + $1
+WHERE id = $2
+RETURNING *;
 ```
-
-ปลอดภัยกว่าการ `SELECT` ค่าไปคำนวณใน Go แล้ว `UPDATE` ค่าผลลัพธ์ เพราะ PostgreSQL สามารถล็อก row และคำนวณจากค่าที่ commit ล่าสุดให้
-
-##### Repeatable Read
-
-Transaction อ่านจาก snapshot เดิมตลอดอายุ transaction จึงอ่านแถวหรือ query เงื่อนไขเดิมซ้ำแล้วเห็นข้อมูลชุดเดิม แม้ transaction อื่นจะ commit ระหว่างนั้น:
-
-```text
-Transaction A                  Transaction B
-─────────────                  ─────────────
-BEGIN REPEATABLE READ
-SELECT balance → 1000
-                               UPDATE balance = 500
-                               COMMIT
-SELECT balance → 1000
-```
-
-Transaction ยังเห็นการเปลี่ยนแปลงที่ตัวเองทำ ภายใต้ PostgreSQL ระดับนี้ป้องกันทั้ง Non-repeatable Read และ Phantom Read ซึ่งเข้มกว่าข้อกำหนดขั้นต่ำของมาตรฐาน SQL
-
-หาก transaction พยายาม update row ที่ถูก transaction อื่นเปลี่ยนและ commit หลัง snapshot ของตน PostgreSQL อาจคืน error:
-
-```text
-could not serialize access due to concurrent update
-```
-
-เมื่อเกิด error ต้อง rollback และ retry ทั้ง transaction ไม่ควร retry เฉพาะ statement เพราะข้อมูลก่อนหน้านั้นมาจาก snapshot เก่า อย่างไรก็ตาม Repeatable Read ยังเกิด Write Skew ได้เมื่อ transactions แก้คนละ rows แต่ร่วมกันละเมิด business invariant
-
-##### Serializable
-
-เป็นระดับเข้มงวดที่สุด ผลที่ commit ต้องเทียบเท่ากับการนำ transactions มาเรียงทำทีละรายการ แม้ในความเป็นจริงจะทำพร้อมกัน PostgreSQL ตรวจจับ serialization anomalies และยกเลิก transaction บางตัวเพื่อรักษาความถูกต้อง:
-
-```text
-could not serialize access due to read/write dependencies among transactions
-```
-
-Application จึงต้องออกแบบให้ retry transaction ทั้งชุดได้ ระดับนี้เหมาะกับ business rules ที่สัมพันธ์กับหลาย rows และไม่สามารถป้องกันได้ง่ายด้วย constraint, atomic update หรือ row lock แต่มีต้นทุนจากการตรวจจับ conflicts, aborted transactions และ retries
-
-Serializable ไม่ได้บังคับให้ transactions รอทำทีละตัวจริง ๆ แต่ยังอนุญาตให้ทำงานพร้อมกัน โดยผลลัพธ์ที่ commit ต้องสามารถอธิบายได้ว่าเทียบเท่ากับลำดับใดลำดับหนึ่งที่ทำทีละ transaction
-
-ตัวอย่างกฎว่าต้องมีแพทย์เข้าเวรอย่างน้อยหนึ่งคน โดยเริ่มต้น A และ B เข้าเวรทั้งคู่:
-
-```text
-Transaction A                    Transaction B
-─────────────                    ─────────────
-เห็น A และ B เข้าเวร             เห็น A และ B เข้าเวร
-จึงให้ A ออกจากเวรได้             จึงให้ B ออกจากเวรได้
-UPDATE A = false                 UPDATE B = false
-```
-
-ถ้าทั้งสอง transaction commit จะไม่มีแพทย์เข้าเวรและละเมิด business invariant ปัญหานี้เรียกว่า Write Skew
-
-ผลลัพธ์นี้ไม่สามารถเกิดขึ้นได้หากทำทีละ transaction เพราะ transaction ที่ทำทีหลังจะเห็นว่าเหลือแพทย์เพียงคนเดียวและไม่อนุญาตให้ออกจากเวร PostgreSQL ในระดับ Serializable จึง commit ตัวหนึ่งและยกเลิกอีกตัวเพื่อรักษาผลลัพธ์ให้เทียบเท่าการทำทีละรายการ:
-
-```text
-A และ B ทำพร้อมกัน
-       │
-       ▼
-PostgreSQL พบ serialization anomaly
-       │
-       ├── A commit
-       └── B rollback ด้วย serialization failure
-                │
-                ▼
-          Application retry B
-                │
-                ▼
-          B เห็นผลที่ A commit แล้ว
-```
-
-Serialization failure ของ PostgreSQL มักมี SQLSTATE `40001` และถือเป็นผลลัพธ์ปกติที่ application ต้องเตรียมรองรับ ไม่ได้หมายความว่าฐานข้อมูลเสียหาย
-
-ตั้งระดับ Serializable ใน Go ได้ว่า:
-
-```go
-tx, err := db.BeginTx(ctx, &sql.TxOptions{
-    Isolation: sql.LevelSerializable,
-})
-```
-
-เมื่อพบ serialization failure ต้อง retry ทั้ง transaction ไม่ใช่เฉพาะ statement สุดท้าย เพราะ operations ก่อนหน้าอาจอ่านและตัดสินใจจาก snapshot เก่าแล้ว
-
-แนวคิด retry:
-
-```go
-for attempt := 0; attempt < maxRetries; attempt++ {
-    err := runSerializableTx(ctx)
-    if !isSerializationFailure(err) {
-        return err
-    }
-}
-
-return errors.New("transaction failed after retries")
-```
-
-ระบบจริงควรกำหนดจำนวน retry สูงสุด ใช้ delay หรือ exponential backoff พร้อม jitter ตรวจ `ctx.Done()` และ retry เฉพาะ error ที่เป็น serialization failure จริง
-
-สรุป: Serializable คือ “ทำพร้อมกันได้ แต่ผลต้องเหมือนทำทีละ transaction” หาก PostgreSQL ไม่สามารถรับประกันคุณสมบัตินี้ได้ จะยกเลิก transaction บางตัวและให้ application retry
-
-##### เปรียบเทียบ Isolation Levels
-
-| ระดับใน PostgreSQL | Snapshot | Non-repeatable Read | Phantom Read | Write Skew | อาจต้อง retry |
-| --- | --- | --- | --- | --- | --- |
-| Read Uncommitted | เหมือน Read Committed | เกิดได้ | เกิดได้ | เกิดได้ | บางกรณี |
-| Read Committed | ใหม่ทุก statement | เกิดได้ | เกิดได้ | เกิดได้ | บางกรณี |
-| Repeatable Read | เดิมตลอด transaction | ป้องกัน | ป้องกัน | ยังเกิดได้ | ใช่ |
-| Serializable | ผลเสมือนทำทีละ transaction | ป้องกัน | ป้องกัน | ป้องกันเมื่อ retry สำเร็จ | ใช่ |
-
-ตั้งระดับใน Go ด้วย `sql.TxOptions`:
-
-```go
-tx, err := db.BeginTx(ctx, &sql.TxOptions{
-    Isolation: sql.LevelRepeatableRead,
-})
-```
-
-หากส่ง `nil` ให้ `BeginTx` จะใช้ค่าเริ่มต้นของฐานข้อมูล ซึ่งสำหรับ PostgreSQL คือ `Read Committed`
-
-แนวทางเลือกใช้:
-
-- CRUD ทั่วไปและ atomic updates เริ่มจาก `Read Committed`
-- งานที่ต้องอ่าน snapshot สอดคล้องกันหลายครั้งใช้ `Repeatable Read`
-- invariant ซับซ้อนข้ามหลาย rows อาจใช้ `Serializable` พร้อม retry
-- ก่อนเพิ่ม isolation level ให้พิจารณา database constraints, atomic conditional update และ `SELECT ... FOR UPDATE` เพราะมักแก้ปัญหาได้ตรงจุดกว่า
-
-Isolation level ที่เข้มงวดขึ้นไม่ได้ดีกว่าเสมอ เพราะอาจเพิ่ม conflicts, retries และลด throughput ควรเลือกตาม anomaly ที่ workflow ต้องป้องกันและทดสอบด้วย concurrent workload จริง
-
-#### Durability — Commit แล้วข้อมูลต้องคงอยู่
-
-เมื่อฐานข้อมูลยืนยันว่า `COMMIT` สำเร็จ ข้อมูลต้องคงอยู่แม้ server crash หรือ restart PostgreSQL ใช้กลไก Write-Ahead Log (WAL) เพื่อช่วยกู้คืนข้อมูลที่ commit แล้ว
 
 ### Transaction ใน Go
 
-ควรรวม lifecycle ที่เขียนซ้ำของ transaction ไว้ใน helper กลาง เช่น `execTx` เพื่อให้ทุก workflow จัดการ `BeginTx`, `Rollback`, `Commit` และ errors ด้วยรูปแบบเดียวกัน แทนการคัดลอกโค้ดนี้ไปไว้ใน `TransferTx`, `CreateOrderTx` หรือ `PaymentTx` ทุกตัว
-
-รูปแบบพื้นฐานด้วย `database/sql`:
+`execTx` รวม boilerplate ของ transaction ไว้จุดเดียว:
 
 ```go
-func execTx(
-    ctx context.Context,
-    db *sql.DB,
-    fn func(*Queries) error,
-) error {
-    tx, err := db.BeginTx(ctx, nil)
-    if err != nil {
-        return err
-    }
-
-    queries := New(tx)
-
-    if err := fn(queries); err != nil {
-        if rollbackErr := tx.Rollback(); rollbackErr != nil {
-            return fmt.Errorf(
-                "transaction error: %v, rollback error: %v",
-                err,
-                rollbackErr,
-            )
-        }
-        return err
-    }
-
-    return tx.Commit()
-}
-```
-
-ลำดับการทำงาน:
-
-```text
-BeginTx
-   │
-   ▼
-ทำ operations ผ่าน Queries
-   │
-   ├── มี error ──> Rollback
-   │
-   └── สำเร็จ ────> Commit
-```
-
-`New(tx)` ใช้งานได้เพราะ `*sql.Tx` มี methods ครบตาม interface `DBTX` เช่นเดียวกับ `*sql.DB` generated queries จึงทำงานได้ทั้งกับ connection pool ปกติและ transaction
-
-generated code มี `WithTx` ให้ใช้ได้เช่นกัน:
-
-```go
-q := store.Queries.WithTx(tx)
-```
-
-ใน configuration ปัจจุบันให้ผลใกล้เคียงกับ `q := New(tx)` เพราะทั้งคู่สร้าง `Queries` ที่ส่ง query ผ่าน `*sql.Tx` แต่ `WithTx` สื่อเจตนาว่ากำลังเปลี่ยน queries ชุดเดิมไปใช้ transaction ได้ชัดกว่า
-
-#### การทำงานของ `Store.execTx`
-
-ตัวอย่าง implementation ใน `Store`:
-
-```go
-func (store *Store) execTx(
+func (store *SQLStore) execTx(
     ctx context.Context,
     fn func(*Queries) error,
 ) error {
@@ -499,11 +147,10 @@ func (store *Store) execTx(
         return err
     }
 
-    q := New(tx)
-    err = fn(q)
-    if err != nil {
+    q := store.Queries.WithTx(tx)
+    if err := fn(q); err != nil {
         if rbErr := tx.Rollback(); rbErr != nil {
-            return fmt.Errorf("tx err: %w, rb err: %w", err, rbErr)
+            return fmt.Errorf("tx err: %w, rollback err: %v", err, rbErr)
         }
         return err
     }
@@ -512,2285 +159,342 @@ func (store *Store) execTx(
 }
 ```
 
-`fn func(*Queries) error` คือ callback ที่ผู้เรียกส่งเข้ามาเพื่อระบุ operations ที่ต้องทำภายใน transaction:
+ทุก query ใน callback ต้องเรียกผ่าน `q` เพราะ `q` ผูกกับ transaction:
 
 ```go
-err := store.execTx(ctx, func(q *Queries) error {
+store.execTx(ctx, func(q *Queries) error {
     _, err := q.CreateTransfer(ctx, arg)
     return err
 })
 ```
 
-เมื่อ `execTx` เรียก `fn(q)` anonymous function ด้านบนจะทำงานโดยใช้ `q` ที่ผูกกับ `tx`
-
-หน้าที่ของแต่ละขั้นตอน:
-
-1. `store.db.BeginTx(ctx, nil)` เริ่ม transaction โดย `nil` หมายถึงใช้ transaction options ค่าเริ่มต้น
-2. `q := New(tx)` สร้าง `Queries` ที่ส่งทุก query ผ่าน transaction เดียวกัน
-3. `fn(q)` รันชุด operations ที่ผู้เรียกกำหนด
-4. หาก `fn` คืน error ให้ `Rollback` และคืน error กลับ
-5. หาก `Rollback` ล้มเหลวด้วย ให้รวม transaction error และ rollback error
-6. หาก `fn` สำเร็จ ให้ `Commit` และคืน commit error หากมี
-
-ภายใน callback ต้องเรียก query ผ่าน `q`:
+ไม่ควรเรียกผ่าน `store` ภายใน callback เพราะอาจออกนอก transaction:
 
 ```go
-q.CreateTransfer(ctx, arg) // อยู่ใน transaction
+store.CreateTransfer(ctx, arg) // ไม่แนะนำใน callback
 ```
 
-ไม่ควรเรียกผ่าน `store`:
+Query เดียวไม่จำเป็นต้องเปิด explicit transaction เสมอ PostgreSQL ทำให้ statement เดียวเป็น atomic อยู่แล้ว ใช้ transaction เมื่อหลาย statements ต้อง commit หรือ rollback พร้อมกัน
 
-```go
-store.CreateTransfer(ctx, arg) // ใช้ connection pool ปกติ อาจอยู่นอก transaction
-```
+### Deadlock
 
-ดังนั้น `execTx` แยกความรับผิดชอบสองส่วนออกจากกัน: helper จัดการ lifecycle ของ transaction ส่วน callback ระบุ business operations ที่ต้องทำเป็นชุดเดียวกัน
-
-ชื่อ `execTx` ขึ้นต้นด้วยตัวพิมพ์เล็กจึงเป็น unexported method ใช้ได้เฉพาะใน package `db` ซึ่งเหมาะสม เพราะ API หรือ service layer ควรเรียก operation ที่สื่อความหมายทางธุรกิจ เช่น `TransferTx` ไม่ควรเปิด transaction แล้วกำหนด queries เอง:
+Deadlock เกิดเมื่อ transactions รอ lock กันเป็นวงจร:
 
 ```text
-API / Service
-     │ เรียก TransferTx
-     ▼
-Business workflow
-     │ เรียก execTx ภายใน
-     ▼
-BeginTx → Queries → Commit / Rollback
+Tx A ถือ Account 1 และรอ Account 2
+Tx B ถือ Account 2 และรอ Account 1
 ```
 
-สำหรับโปรเจกต์นี้ การวาง `execTx` ใน `db/sqlc/store.go` เหมาะสม เพราะอยู่ใกล้ generated database code และใช้ types ร่วมกันได้ง่าย แม้ชื่อโฟลเดอร์ `sqlc` อาจทำให้ดูเหมือนทุกไฟล์ถูก generate ก็ตาม ให้แยกจากข้อความบนไฟล์: ไฟล์ generated มี `Code generated by sqlc. DO NOT EDIT.` ส่วน `store.go` เป็น custom code ที่แก้ไขได้
+PostgreSQL จะยกเลิก transaction หนึ่งตัวและคืน SQLSTATE `40P01`
 
-เมื่อระบบใหญ่ขึ้นอาจแยก generated code ไว้ใน `internal/db/sqlc` และ custom store ไว้ใน `internal/store` แต่ไม่จำเป็นสำหรับโครงสร้างขนาดเล็ก หากการแยกทำให้ imports และ type conversions ซับซ้อนขึ้นโดยยังไม่มีประโยชน์ชัดเจน
+แนวทางลด deadlock:
 
-#### ควรวาง `execTx` ไว้ที่ใด
+1. ล็อกหลาย rows ตามลำดับเดียวกัน เช่น ID น้อยก่อน
+2. ใช้ atomic update เมื่อทำได้
+3. ทำ transaction ให้สั้น
+4. ไม่เรียก external service ขณะถือ lock
+5. ใช้ lock ที่เหมาะสม เช่น `FOR NO KEY UPDATE` เมื่อไม่ได้แก้ key
+6. Retry ทั้ง transaction โดยจำกัดจำนวนครั้งและตรวจ Context
 
-ตำแหน่งไฟล์ไม่มีผลต่อการเรียกใช้ใน Go หากทุกไฟล์ประกาศ `package db` เดียวกัน จึงเก็บ `execTx` ใน `store.go` ได้ หรือแยกไฟล์เมื่อโค้ดเริ่มยาว:
+`40P01` คือ deadlock ส่วน `40001` คือ serialization failure ทั้งสองกรณีอาจ retry ทั้ง transaction ได้
 
-```text
-db/sqlc/
-├── db.go             generated ห้ามแก้เอง
-├── store.go          Store และ NewStore
-├── transaction.go    Store.execTx
-├── account_tx.go     account workflows
-└── transfer_tx.go    transfer workflows
-```
+## 4. sqlc
 
-ไม่ควรเพิ่ม custom code ลง `db.go` เพราะเป็น generated file และอาจถูกเขียนทับเมื่อรัน `sqlc generate` การแยก `transaction.go` เป็นเพียงการจัดระเบียบไฟล์ ไม่ได้เปลี่ยน abstraction เพราะ `execTx` ยังเป็น method ของ `Store` เหมือนเดิม
+sqlc อ่าน schema และ SQL queries แล้วสร้าง Go code แบบ type-safe
 
-ยังไม่จำเป็นต้องทำ generic transaction function สำหรับทุก repository หากมีเพียง `Store` เดียว เพราะอาจทำให้ API ซับซ้อนและซ่อนขอบเขต transaction มากเกินไป หากแยกเป็นหลาย repositories ในอนาคต ต้องให้ repository ทุกตัวรับ `*sql.Tx` ตัวเดียวกัน ไม่ใช่ให้แต่ละ repository เปิด transaction ของตัวเอง:
-
-```text
-ถูกต้อง: Transaction เดียว
-         ├── AccountRepository
-         ├── TransferRepository
-         └── EntryRepository
-
-ไม่ถูกต้อง: AccountRepository  → Transaction 1
-            TransferRepository → Transaction 2
-            EntryRepository    → Transaction 3
-```
-
-กรณีมีหลาย repositories จริงอาจสร้าง `TransactionManager` หรือ Unit of Work เป็นผู้เปิด transaction แล้วสร้าง repositories ที่ผูกกับ `tx` เดียวกัน แต่สำหรับโปรเจกต์นี้ `*Queries` รวม database methods และรับ `*sql.Tx` ผ่าน `DBTX` อยู่แล้ว `Store.execTx` จึงเพียงพอและตรงไปตรงกว่า
-
-#### Account ใช้ Transaction อย่างไร
-
-Account ใช้ `store.execTx` ตัวเดียวกับ Transfer ได้ ไม่ต้องสร้าง `execAccountTx` แยก หาก operation มีหลาย statements ที่ต้องสำเร็จร่วมกัน เช่นปรับ balance และสร้าง entry:
-
-```go
-type AddAccountBalanceTxParams struct {
-    AccountID int64
-    Amount    int64
-}
-
-type AddAccountBalanceTxResult struct {
-    Account Account
-    Entry   Entry
-}
-
-func (store *Store) AddAccountBalanceTx(
-    ctx context.Context,
-    arg AddAccountBalanceTxParams,
-) (AddAccountBalanceTxResult, error) {
-    var result AddAccountBalanceTxResult
-
-    err := store.execTx(ctx, func(q *Queries) error {
-        var err error
-
-        result.Account, err = q.AddAccountBalance(ctx, AddAccountBalanceParams{
-            ID:     arg.AccountID,
-            Amount: arg.Amount,
-        })
-        if err != nil {
-            return err
-        }
-
-        result.Entry, err = q.CreateEntry(ctx, CreateEntryParams{
-            AccountID: arg.AccountID,
-            Amount:    arg.Amount,
-        })
-        return err
-    })
-
-    return result, err
-}
-```
-
-ตัวอย่างนี้ต้องมี generated query ที่ปรับยอดแบบ atomic:
-
-```sql
--- name: AddAccountBalance :one
-UPDATE accounts
-SET balance = balance + sqlc.arg(amount)
-WHERE id = sqlc.arg(id)
-RETURNING *;
-```
-
-`AddAccountBalance` เพิ่มหรือลดยอดจากค่าปัจจุบันภายใน SQL statement เดียว:
-
-```text
-balance เดิม 100 + amount 20   = 120
-balance เดิม 100 + amount -20  = 80
-```
-
-`sqlc.arg(amount)` และ `sqlc.arg(id)` ตั้งชื่อ parameters ให้ `sqlc` สร้าง struct ที่อ่านง่าย:
-
-```go
-type AddAccountBalanceParams struct {
-    Amount int64
-    ID     int64
-}
-```
-
-การโอนเงินใช้ค่าติดลบกับบัญชีต้นทางและค่าบวกกับบัญชีปลายทาง:
-
-```go
-// หักเงินต้นทาง
-q.AddAccountBalance(ctx, AddAccountBalanceParams{
-    ID:     arg.FromAccountID,
-    Amount: -arg.Amount,
-})
-
-// เพิ่มเงินปลายทาง
-q.AddAccountBalance(ctx, AddAccountBalanceParams{
-    ID:     arg.ToAccountID,
-    Amount: arg.Amount,
-})
-```
-
-รูปแบบ `SET balance = balance + amount` เป็น atomic update PostgreSQL จะล็อก row ที่ update และคำนวณจาก balance ล่าสุด transaction อื่นจึงไม่สามารถแทรกระหว่างการอ่านค่าเดิมกับการเขียนค่าใหม่ภายใน statement นี้ได้ ช่วยป้องกัน Lost Update และมักไม่ต้อง `SELECT ... FOR UPDATE` แยกก่อน
-
-Atomicity ของ statement นี้ครอบคลุมเฉพาะการเปลี่ยน balance หนึ่งครั้ง หาก workflow มีการสร้าง transfer, entries, หักเงินและเพิ่มเงินหลาย statements ยังต้องใช้ transaction เพื่อให้ทั้งหมด commit หรือ rollback พร้อมกัน
-
-หากระบบไม่อนุญาตยอดติดลบ ควรเพิ่มเงื่อนไขหรือ constraint เช่น:
-
-```sql
-UPDATE accounts
-SET balance = balance + sqlc.arg(amount)
-WHERE id = sqlc.arg(id)
-  AND balance + sqlc.arg(amount) >= 0
-RETURNING *;
-```
-
-เมื่อยอดไม่พอ query แบบ `:one` จะไม่พบ row และ Go method จะคืน `sql.ErrNoRows` ซึ่ง application สามารถแปลงเป็น insufficient balance error ได้ นอกจากนี้อาจใช้ `CHECK (balance >= 0)` เป็นแนวป้องกันสุดท้ายใน schema
-
-หากมี SQL statement เดียว เช่น `GetAccount`, `CreateAccount` หรือ atomic update เดียว โดยทั่วไปไม่ต้องเปิด explicit transaction เพราะ PostgreSQL ทำให้ statement เดียวสำเร็จหรือยกเลิกเป็นหน่วยเดียวอยู่แล้ว ควรใช้ transaction เมื่อมีหลาย statements, read-then-update, row locking หรือข้อมูลหลายส่วนที่ต้องสอดคล้องกัน
-
-#### `NewStore` กับ `WithTx` ทำงานคนละหน้าที่
-
-เมื่อเปลี่ยนภายใน `execTx` จาก `New(tx)` เป็น:
-
-```go
-q := store.Queries.WithTx(tx)
-```
-
-ไม่ต้องเปลี่ยน `NewStore`:
-
-```go
-func NewStore(db *sql.DB) *Store {
-    return &Store{
-        db:      db,
-        Queries: New(db),
-    }
-}
-```
-
-`NewStore` เตรียม object อายุยาวสองส่วน:
-
-- `store.db` เก็บ `*sql.DB` เพื่อเรียก `BeginTx`
-- `store.Queries` ใช้รัน queries ปกติผ่าน connection pool
-
-ส่วน `WithTx(tx)` สร้าง `*Queries` ชั่วคราวตัวใหม่ที่ผูกกับ transaction ปัจจุบัน โดยไม่แก้ `store.Queries` ตัวเดิม:
-
-```text
-store.db      ────────► *sql.DB ใช้ BeginTx
-store.Queries ────────► *sql.DB ใช้ query ปกติ
-q จาก WithTx ─────────► *sql.Tx ใช้เฉพาะใน transaction
-```
-
-หลัง callback จบไม่ควรนำ `q` กลับมาใช้อีก ส่วน `store.Queries` ยังคงใช้งานผ่าน pool ตามปกติ `Store` ต้องเก็บ `db *sql.DB` แยกไว้เพราะ generated `DBTX` มี methods สำหรับ execute และ query แต่ไม่มี `BeginTx`
-
-#### Deadlock Guide
-
-หัวข้อนี้อธิบายสาเหตุ การวิเคราะห์ และวิธีแก้ Deadlock
-
-Deadlock เกิดเมื่อ transactions หลายตัวถือ locks ที่อีกฝ่ายต้องการและรอกันเป็นวงจร จนไม่มีตัวใดทำงานต่อได้:
-
-```text
-Transaction A ถือ lock ของ account 1 และรอ account 2
-Transaction B ถือ lock ของ account 2 และรอ account 1
-
-A รอ B และ B รอ A ──> Deadlock
-```
-
-PostgreSQL ตรวจพบวงจรนี้แล้วจะยกเลิก transaction หนึ่งตัวเพื่อให้อีกตัวทำงานต่อ โดยคืน error:
-
-```text
-pq: deadlock detected (40P01)
-```
-
-SQLSTATE `40P01` หมายถึง deadlock detected Transaction ที่ถูกยกเลิกจะ rollback และ application ต้องจัดการ error หรือ retry ทั้ง transaction หาก operation นั้นปลอดภัยต่อการ retry
-
-##### Deadlock จาก Foreign Key และ `FOR UPDATE`
-
-ใน workflow โอนเงิน transactions สร้าง `transfers` และ `entries` ซึ่งมี Foreign Key อ้างถึง `accounts` ก่อนจะล็อกบัญชี:
-
-```text
-CreateTransfer / CreateEntry
-           │
-           ▼
-Foreign Key ตรวจ accounts.id
-           │
-           ▼
-อาจถือ KEY SHARE lock
-           │
-           ▼
-GetAccountForUpdate ขอ FOR UPDATE lock
-```
-
-`KEY SHARE` ช่วยป้องกันไม่ให้ key ของ account ถูกลบหรือเปลี่ยนระหว่างที่ row อื่นกำลังอ้างอิง ส่วน `FOR UPDATE` เป็น lock ที่แรงและขัดแย้งกับ `KEY SHARE` เมื่อหลาย transactions ถือและขอ locks เหล่านี้สลับกันจึงอาจเกิด deadlock
-
-Log ที่พิมพ์ก่อน query เช่น:
-
-```go
-fmt.Println(txName, "get account 1")
-account, err := q.GetAccountForUpdate(ctx, id)
-```
-
-หมายถึง transaction กำลังจะขอ lock ไม่ได้หมายความว่าได้ lock แล้ว เพราะมันอาจหยุดรออยู่ภายใน `GetAccountForUpdate`
-
-##### ใช้ `FOR NO KEY UPDATE` เมื่อไม่ได้แก้ Key
-
-หาก transaction ต้องแก้เฉพาะ `balance` และไม่ได้เปลี่ยน Primary Key สามารถใช้ lock ที่อ่อนกว่า:
-
-```sql
--- name: GetAccountForUpdate :one
-SELECT * FROM accounts
-WHERE id = $1
-FOR NO KEY UPDATE;
-```
-
-`FOR NO KEY UPDATE` ยังป้องกัน transaction อื่นแก้ row เดียวกันพร้อมกัน แต่ทำงานร่วมกับ `KEY SHARE` ของ Foreign Key ได้ เพราะประกาศว่า transaction ไม่ได้ต้องการเปลี่ยน key จึงลดโอกาส deadlock ในกรณีนี้
-
-เปรียบเทียบโดยย่อ:
-
-| Row lock | กันการแก้ row พร้อมกัน | ขัดกับ Foreign Key `KEY SHARE` | เหมาะกับ |
-| --- | --- | --- | --- |
-| `FOR UPDATE` | ใช่ | ใช่ | ลบ row หรือเปลี่ยน key ที่ถูกอ้างอิง |
-| `FOR NO KEY UPDATE` | ใช่ | ไม่ขัด | แก้คอลัมน์ทั่วไป เช่น `balance` |
-
-หลังเปลี่ยน SQL query ต้องสร้าง generated code ใหม่:
-
-```bash
-sqlc generate
-```
-
-##### ใช้ Atomic Update
-
-ถ้า operation เพียงเพิ่มหรือลด balance สามารถให้ PostgreSQL คำนวณจากค่าล่าสุดใน statement เดียว:
-
-```sql
--- name: AddAccountBalance :one
-UPDATE accounts
-SET balance = balance + $2
-WHERE id = $1
-RETURNING *;
-```
-
-`UPDATE` จะขอ row lock ที่เหมาะสมให้อัตโนมัติ วิธีนี้ลดช่วงเวลาระหว่างการอ่านและเขียน และช่วยป้องกัน Lost Update โดยไม่ต้อง `SELECT ... FOR UPDATE` แยกก่อน
-
-##### ล็อกหลาย Rows ตามลำดับเดียวกัน
-
-แม้ใช้ lock ที่เหมาะสม การโอนเงินสวนทางกันก็ยัง deadlock ได้:
-
-```text
-Tx A: account 1 ──> account 2
-Tx B: account 2 ──> account 1
-```
-
-ถ้าทั้งสอง transaction ล็อกบัญชีต้นทางก่อน Tx A อาจถือ account 1 และรอ account 2 ขณะที่ Tx B ถือ account 2 และรอ account 1 วิธีลดความเสี่ยงคือล็อกหรือ update บัญชีตามลำดับที่แน่นอน เช่น ID น้อยก่อนเสมอ:
-
-```go
-if arg.FromAccountID < arg.ToAccountID {
-    // update from ก่อน แล้ว to
-} else {
-    // update to ก่อน แล้ว from
-}
-```
-
-##### แนวทางรับมือ Deadlock
-
-1. ทำ transaction ให้สั้นและไม่เรียก external service ขณะถือ locks
-2. ใช้ lock ที่อ่อนที่สุดแต่ยังรักษาความถูกต้อง เช่น `FOR NO KEY UPDATE`
-3. ใช้ atomic update เมื่อทำได้
-4. ล็อกหลาย rows ตามลำดับเดียวกันทุก workflow
-5. ตรวจ SQLSTATE `40P01` และ retry ทั้ง transaction โดยจำกัดจำนวนครั้ง พร้อม backoff และ jitter
-6. ตรวจ `context.Context` เพื่อหยุด retry เมื่อ request หมดเวลาหรือถูกยกเลิก
-7. ทดสอบด้วย concurrent transactions เพราะ sequential tests มักไม่เปิดเผย deadlock
-
-Deadlock ต่างจาก serialization failure (`40001`): `40P01` เกิดจากวงจรการรอ locks ส่วน `40001` เกิดเมื่อ PostgreSQL ไม่สามารถรักษาผลลัพธ์แบบ Serializable ได้ ทั้งสองกรณีอาจ retry ทั้ง transaction ได้ แต่ควรตรวจ error code ให้ถูกต้อง
-
-ข้อควรระวัง:
-
-- ตรวจ error จาก `BeginTx`, operations, `Rollback` และ `Commit`
-- ส่ง `context.Context` เพื่อให้ transaction ถูกยกเลิกได้เมื่อ request หมดเวลาหรือถูกยกเลิก
-- อย่าทำงานที่ใช้เวลานานหรือเรียก external service ภายใน transaction โดยไม่จำเป็น เพราะจะถือ connection และ locks นานขึ้น
-- อย่าเปิด transaction ซ้อนโดยไม่ตั้งใจ และอย่านำ `*sql.Tx` หรือ `q` ไปใช้หลัง callback จบ
-- ทุก database operation ภายใน callback ต้องเรียกผ่าน `q` ที่ผูกกับ transaction
-- เมื่อหลาย transactions ล็อกหลายแถว ควรล็อกตามลำดับที่แน่นอนเพื่อลดโอกาสเกิด deadlock
-- transaction ที่ระดับ `Serializable` อาจต้องมี retry เมื่อเกิด serialization failure
-
-หากบาง workflow ต้องใช้ isolation level หรือ read-only mode ต่างจากค่าเริ่มต้น สามารถขยาย helper ให้รับ `*sql.TxOptions` แล้วส่งต่อให้ `BeginTx` ได้ โดยไม่จำเป็นต้องทำให้ helper รองรับทุกกรณีล่วงหน้า
-
-สรุป: Transaction รวมหลาย operations เป็นงานหนึ่งชุด ส่วน ACID อธิบายคุณสมบัติที่ทำให้งานชุดนั้นเชื่อถือได้ ได้แก่ Atomicity, Consistency, Isolation และ Durability
-
-## 3. การตั้งค่า sqlc
-
-ไฟล์ `sqlc.yaml` ใช้บอก `sqlc` ว่าจะอ่าน schema และ SQL query จากที่ใด รวมถึงกำหนดรูปแบบของ Go code ที่ต้องการสร้าง:
-
-```yaml
-version: "2"
-
-sql:
-  - name: "db"
-    engine: "postgresql"
-    schema: "./db/migration"
-    queries: "./db/query"
-    gen:
-      go:
-        package: "db"
-        out: "./db/sqlc"
-        sql_package: "database/sql"
-        emit_json_tags: true
-        emit_prepared_queries: false
-        emit_interface: false
-        emit_exact_table_names: false
-```
-
-ความหมายของค่าหลัก:
-
-- `engine` กำหนดชนิดฐานข้อมูล ในที่นี้คือ PostgreSQL
-- `schema` ระบุตำแหน่ง schema หรือโฟลเดอร์ migration โดย `sqlc` จะอ่านไฟล์ migration ตามลำดับชื่อ
-- `queries` ระบุโฟลเดอร์ที่เก็บ SQL query สำหรับสร้าง Go methods
-- `package` กำหนดชื่อ package ของ Go code ที่สร้างขึ้น
-- `out` กำหนดโฟลเดอร์ปลายทางของ Go code
-- `sql_package` กำหนด database package ที่ใช้ ในที่นี้คือ `database/sql`
-
-### ตัวเลือกการสร้าง Go code
-
-#### `emit_json_tags: true`
-
-เพิ่ม JSON tags ให้ field ของ struct เพื่อให้ใช้งานกับ JSON API ได้สะดวก:
-
-```go
-type Account struct {
-    ID      int64 `json:"id"`
-    Balance int64 `json:"balance"`
-}
-```
-
-#### `emit_prepared_queries: false`
-
-ไม่สร้าง prepared statements ไว้ล่วงหน้า แต่ให้ query เรียกฐานข้อมูลโดยตรงตามปกติ หากตั้งเป็น `true` จะมีขั้นตอนเตรียมและเก็บ statements สำหรับนำกลับมาใช้ซ้ำ
-
-- `false` เริ่ม application ง่าย ไม่ต้อง prepare และปิด statements เหมาะเมื่อ query ยังไม่มากหรือยังไม่พบปัญหาด้าน performance
-- `true` อาจช่วย query เดิมที่ถูกเรียกซ้ำจำนวนมาก และทำให้พบข้อผิดพลาดตอน prepare ตั้งแต่เริ่ม application
-- `true` มีต้นทุนตอนเริ่มระบบ ใช้ resource เพิ่ม และต้องจัดการ lifecycle เช่นเรียก `Close()`
-- prepared statements ไม่ได้รับประกันว่าจะเร็วกว่าเสมอ ควร benchmark ด้วย workload จริง
-
-โปรเจกต์นี้ใช้ `database/sql` และมี query ไม่มาก จึงคง `false` ไว้ก่อนได้ หากเปลี่ยนไปใช้ `pgx/v5` ตัว driver มี implicit prepared statement support อยู่แล้ว
-
-#### `emit_interface: false`
-
-ไม่สร้าง interface ที่รวม query methods หากตั้งเป็น `true` จะสร้าง interface เช่น `Querier` ซึ่งช่วยในการทำ mock, dependency injection และ unit test
-
-```go
-type Querier interface {
-    GetAccount(ctx context.Context, id int64) (Account, error)
-    ListAccounts(ctx context.Context) ([]Account, error)
-}
-```
-
-ข้อดีเมื่อเปิดเป็น `true`:
-
-- ใช้ Dependency Injection ได้สะดวก
-- ส่ง mock หรือ fake เข้าไปทดสอบ business logic โดยไม่ต้องต่อฐานข้อมูลจริงได้
-- compiler ช่วยตรวจว่า implementation มี methods ครบ
-
-ข้อควรพิจารณา:
-
-- `Querier` จะรวม query methods ทั้งหมดและอาจใหญ่เกินความจำเป็นเมื่อระบบโตขึ้น
-- mock ที่ implement interface ทั้งก้อนต้องปรับตามเมื่อมี method ใหม่
-- transaction ที่รวมหลาย query อาจยังต้องมี `Store` interface ของ application เอง
-
-ถ้าแต่ละ service ใช้เพียงไม่กี่ query สามารถประกาศ interface ขนาดเล็กใกล้ผู้ใช้งานแทนได้:
-
-```go
-type AccountStore interface {
-    GetAccount(ctx context.Context, id int64) (Account, error)
-    CreateAccount(ctx context.Context, arg CreateAccountParams) (Account, error)
-}
-```
-
-#### `emit_exact_table_names: false`
-
-อนุญาตให้ `sqlc` เปลี่ยนชื่อตารางแบบพหูพจน์เป็นชื่อ model แบบเอกพจน์ เช่น ตาราง `accounts` จะสร้าง struct ชื่อ `Account` หากตั้งเป็น `true` ชื่อ struct จะอิงชื่อตารางตรง ๆ เป็น `Accounts`
-
-หลังจากสร้างไฟล์ query ใน `db/query` แล้ว ให้สร้าง Go code ด้วยคำสั่ง:
-
-```bash
-sqlc generate
-```
-
-## 4. การทำงานของ `sqlc generate`
-
-`sqlc generate` จะอ่าน schema และ SQL query แล้วสร้าง Go code สำหรับติดต่อฐานข้อมูลโดยอัตโนมัติ:
-
-```text
-Migration ──> วิเคราะห์ Schema ──┐
-                                 ├──> สร้าง Go code
-SQL Query ──> วิเคราะห์ Query ───┘
-```
-
-### 1. อ่าน Database Schema
-
-`sqlc` อ่าน migration ใน `db/migration` เพื่อทำความเข้าใจตาราง คอลัมน์ ชนิดข้อมูล ค่า nullable, Primary Key และ Foreign Key จากนั้นจึงแปลงชนิดข้อมูล PostgreSQL เป็น Go เช่น:
-
-| PostgreSQL | Go |
-| --- | --- |
-| `BIGINT` / `BIGSERIAL` | `int64` |
-| `VARCHAR` / `TEXT` | `string` |
-| `BOOLEAN` | `bool` |
-| `TIMESTAMPTZ` | `time.Time` |
-| nullable `TEXT` | `sql.NullString` |
-
-### 2. อ่าน SQL Query
-
-ตัวอย่างไฟล์ `db/query/account.sql`:
+เราเขียน SQL:
 
 ```sql
 -- name: GetAccount :one
 SELECT * FROM accounts
-WHERE id = $1 LIMIT 1;
+WHERE id = $1;
 ```
 
-- `GetAccount` คือชื่อ Go method ที่จะถูกสร้าง
-- `:one` หมายถึงคืนผลลัพธ์หนึ่งแถว
-- `$1` คือ parameter ตัวแรก โดย `sqlc` จะอนุมานชนิดจาก schema
-
-รูปแบบผลลัพธ์ที่ใช้บ่อย ได้แก่ `:one` สำหรับหนึ่งแถว, `:many` สำหรับหลายแถว, `:exec` สำหรับคำสั่งที่ไม่คืน record และ `:execrows` สำหรับคืนจำนวนแถวที่ได้รับผลกระทบ
-
-#### `:one` และ `RETURNING` ทำหน้าที่ต่างกัน
-
-`:one` เป็น annotation ที่บอก `sqlc` ให้สร้าง Go method สำหรับรับหนึ่ง row แต่ไม่ได้ทำให้ SQL คืนข้อมูลเอง
-
-`SELECT` คืน rows อยู่แล้ว จึงไม่ต้องใช้ `RETURNING`:
-
-```sql
--- name: GetAccountForUpdate :one
-SELECT * FROM accounts
-WHERE id = $1
-FOR NO KEY UPDATE;
-```
-
-ส่วน `INSERT`, `UPDATE` และ `DELETE` ปกติไม่คืน row หากใช้ `:one` ต้องเพิ่ม `RETURNING`:
-
-```sql
--- name: AddAccountBalance :one
-UPDATE accounts
-SET balance = balance + sqlc.arg(amount)
-WHERE id = sqlc.arg(id)
-RETURNING *;
-```
-
-| SQL command | คืน row โดยปกติ | ต้องใช้ `RETURNING` เมื่อต้องการ `:one` |
-| --- | --- | --- |
-| `SELECT` | ใช่ | ไม่ต้อง |
-| `INSERT` | ไม่ | ต้อง |
-| `UPDATE` | ไม่ | ต้อง |
-| `DELETE` | ไม่ | ต้อง |
-
-หาก query แบบ `:one` ไม่คืน row generated method จะคืน `sql.ErrNoRows`
-
-### 3. ตรวจสอบ Query
-
-`sqlc` ตรวจสอบว่าตารางและคอลัมน์มีอยู่จริง พร้อมวิเคราะห์ชนิดของ parameter และผลลัพธ์ หาก query ไม่สอดคล้องกับ schema คำสั่งจะหยุดและแจ้ง error ก่อนรัน application
-
-### 4. สร้าง Models และ Query Methods
-
-`db/sqlc/models.go` จะมี struct ที่แทนข้อมูลในตาราง:
+sqlc สร้าง method:
 
 ```go
-type Account struct {
-    ID      int64  `json:"id"`
-    Owner   string `json:"owner"`
-    Balance int64  `json:"balance"`
-}
+func (q *Queries) GetAccount(
+    ctx context.Context,
+    id int64,
+) (Account, error)
 ```
 
-ส่วน query จะถูกสร้างเป็น Go method ที่มีชนิดข้อมูลชัดเจน เช่น:
+ข้อดี:
+
+- ลด boilerplate เช่น `QueryRow`, `Scan` และ params structs
+- ตรวจ column และ type ตั้งแต่ generate
+- ยังเขียนและปรับ SQL ได้โดยตรง
+- ได้ models และ methods ที่ type-safe
+
+รัน:
+
+```bash
+sqlc generate
+# หรือ
+make sqlc
+```
+
+ไฟล์ที่มีข้อความนี้ห้ามแก้เอง:
 
 ```go
-func (q *Queries) GetAccount(ctx context.Context, id int64) (Account, error)
+// Code generated by sqlc. DO NOT EDIT.
 ```
 
-จึงไม่ต้องเขียน `QueryRow`, `Scan` และการแปลงชนิดข้อมูลซ้ำด้วยตนเอง
+### ค่าปัจจุบันใน `sqlc.yaml`
 
-### 5. ไฟล์ที่ถูกสร้าง
+```yaml
+emit_json_tags: true
+emit_prepared_queries: false
+emit_interface: true
+emit_exact_table_names: false
+emit_empty_slices: true
+```
+
+- `emit_json_tags` เพิ่ม JSON tags ให้ models
+- `emit_prepared_queries` ไม่สร้าง explicit prepared statements
+- `emit_interface` สร้าง `Querier` interface
+- `emit_exact_table_names` ให้ sqlc singularize ชื่อ model
+- `emit_empty_slices` ให้ query แบบ `:many` คืน slice ว่างแทน `nil`
+
+`sqlc generate` ไม่ได้สร้าง database, รัน migration หรือเปิด connection สิ่งเหล่านี้เป็นหน้าที่ของ application และ migration tool
+
+## 5. Store, Interface และ Dependency Injection
+
+### Queries กับ Store
+
+`Queries` ทำงานระดับ SQL query เดียว ส่วน `Store` เพิ่ม business transaction เช่น `TransferTx`
 
 ```text
-db/sqlc/
-├── db.go
-├── models.go
-└── account.sql.go
+Queries → GetAccount, CreateEntry, AddAccountBalance
+Store   → Queries ทั้งหมด + TransferTx
 ```
 
-- `db.go` เก็บ `Queries`, `DBTX` และ constructor `New`
-- `models.go` เก็บ struct ที่สร้างจากตาราง
-- `account.sql.go` เก็บ SQL constants และ methods จาก `account.sql`
-
-ตัวอย่างการใช้งาน generated code:
+โค้ดปัจจุบัน:
 
 ```go
-database, err := sql.Open("postgres", databaseURL)
-if err != nil {
-    log.Fatal(err)
+type Store interface {
+    Querier
+    TransferTx(ctx context.Context, arg TransferTxParams) (TransferResult, error)
 }
 
-queries := db.New(database)
-account, err := queries.GetAccount(context.Background(), 1)
-```
-
-### สิ่งที่ `sqlc generate` ไม่ได้ทำ
-
-คำสั่งนี้ไม่ได้สร้างฐานข้อมูลหรือตารางจริง ไม่ได้รัน migration ไม่ได้แก้ไขข้อมูล และไม่ได้เปิด database connection การนำ schema ไปใช้กับ PostgreSQL จริงยังต้องใช้ migration tool เช่น `golang-migrate`
-
-สรุป: `sqlc generate` แปลง schema และ SQL query ให้เป็น Go code แบบ type-safe ช่วยลด boilerplate และตรวจพบ query ที่ไม่สอดคล้องกับ schema ตั้งแต่ขั้นตอน generate
-
-### Generated `Queries` เทียบกับ Custom `Store`
-
-`sqlc` สร้าง Go method จาก SQL query แต่ละรายการ เช่น `CreateTransfer`, `CreateEntry` และ `GetAccount` โดยไม่รู้ business workflow ของ application ว่าหนึ่ง operation ต้องเรียก query ใดบ้างและต้องสำเร็จร่วมกันอย่างไร
-
-```text
-ไฟล์ SQL
-   │ sqlc generate
-   ▼
-Queries: งานฐานข้อมูลครั้งละหนึ่ง query
-   │ นำหลาย query มาประกอบกัน
-   ▼
-Store: transaction และ business workflow
-```
-
-งานที่ใช้ query เดียวสามารถเรียก generated method ได้ตรง ๆ:
-
-```go
-account, err := store.GetAccount(ctx, id)
-```
-
-แต่การโอนเงินประกอบด้วยหลายขั้นตอน เช่นสร้าง transfer, สร้าง entries และปรับ balance ของสองบัญชี หากขั้นตอนใดล้มเหลวต้อง rollback ทั้งหมด `sqlc` ไม่สามารถอนุมาน workflow นี้จาก SQL แต่ละไฟล์ได้ จึงต้องเขียน custom method เช่น `TransferTx` ใน `store.go`
-
-```go
-type Store struct {
+type SQLStore struct {
     *Queries
     db *sql.DB
 }
 ```
 
-- embedded `*Queries` ทำให้ `Store` เรียก generated query methods ได้
-- `db *sql.DB` ใช้เริ่ม transaction ด้วย `BeginTx`
-- `execTx` จัดการ `BeginTx`, `Rollback` และ `Commit`
-- `TransferTx` กำหนดลำดับของ business operations ภายใน transaction
+- `Store` คือ contract
+- `SQLStore` คือ implementation ที่ใช้ PostgreSQL
+- Embedded `*Queries` ทำให้ `SQLStore` มี methods จาก `Querier`
+- `db *sql.DB` ใช้เปิด transaction
+- `execTx` เป็น private helper จึงไม่ต้องอยู่ใน interface
 
-Constructor เตรียมทั้ง connection สำหรับเริ่ม transaction และ generated queries สำหรับใช้งานปกติ:
+Constructor สร้าง `SQLStore` แล้วคืนในรูป `Store`:
 
 ```go
-func NewStore(db *sql.DB) *Store {
-    return &Store{
+func NewStore(db *sql.DB) Store {
+    return &SQLStore{
         db:      db,
         Queries: New(db),
     }
 }
 ```
 
-ควรสร้าง custom method เมื่อ operation ใช้หลาย queries, ต้องมี transaction, มี business rules, ต้องจัดลำดับงาน หรือรวมผลลัพธ์หลายส่วน ไม่จำเป็นต้องครอบ generated method ทุกตัวด้วย custom function เพิ่มอีกชั้น
+Interface กำหนด methods ไม่ได้กำหนด fields ดังนั้น `SQLStore` มี `*sql.DB` ได้แม้ `Store` ไม่มี field นี้
 
-ไฟล์ generated จะมีข้อความ `Code generated by sqlc. DO NOT EDIT.` และอาจถูกเขียนทับเมื่อรัน `sqlc generate` จึงไม่ควรแก้เอง ส่วน `store.go` ไม่มีข้อความนี้และเป็น custom code ที่ application ดูแลเอง แม้จะอยู่ใน package `db` และโฟลเดอร์ `db/sqlc` เดียวกัน
+### Implicit Interface Implementation
 
-ในโค้ดปัจจุบัน `TransferTx` สร้าง transfer และ entries แล้ว แต่ยังไม่ได้ปรับ balance หรือกำหนดค่า `FromAccount` และ `ToAccount` ในผลลัพธ์ จึงเป็น workflow ที่ยังต้องพัฒนาต่อ
+Go ไม่ต้องเขียนคำว่า `implements` ถ้า type มี methods ครบก็ implement interface อัตโนมัติ
 
-## 5. พื้นฐานภาษา Go
+Compile-time assertion:
 
-### Boilerplate คืออะไร
+```go
+var _ Querier = (*Queries)(nil)
+```
 
-Boilerplate คือโค้ดรูปแบบเดิมที่จำเป็นต้องเขียนซ้ำเพื่อให้ระบบทำงาน แต่ไม่ใช่ business logic หลัก เช่นการเรียก query, สร้างตัวแปรรับผลลัพธ์, `Scan` fields และส่งต่อ error
+แปลว่าให้ compiler ตรวจว่า `*Queries` implement `Querier` ครบ โดยไม่สร้าง object จริง
 
-`sqlc` ช่วยสร้าง boilerplate ของ database layer จาก SQL ทำให้เราเรียก method ที่ type-safe ได้โดยไม่ต้องเขียนโค้ดเดิมซ้ำทุก query
+### Dependency Injection
 
-### `int` และ `int64`
+`Server` รับ Store จากภายนอก:
 
-- `int` มีขนาดตามสถาปัตยกรรมของเครื่อง เหมาะกับ index, `len()`, `cap()` และ loop
-- `int64` มีขนาด 64 บิตเสมอ เหมาะกับ PostgreSQL `BIGINT`, ID, balance และข้อมูลที่ต้องมีขนาดแน่นอน
-- แม้บนเครื่อง 64-bit ทั้งสองอาจมีขนาดเท่ากัน แต่ Go ถือว่าเป็นคนละ type
+```go
+type Server struct {
+    store  db.Store
+    router *gin.Engine
+}
+
+func NewServer(store db.Store) *Server {
+    return &Server{store: store}
+}
+```
+
+Production ส่ง `SQLStore`:
+
+```go
+store := db.NewStore(conn)
+server := api.NewServer(store)
+```
+
+Unit test ส่ง `MockStore`:
+
+```go
+store := mockdb.NewMockStore(ctrl)
+server := api.NewServer(store)
+```
+
+ไม่ใช้ `*db.Store` เพราะ `Store` เป็น interface ที่เก็บ pointer implementation เช่น `*SQLStore` อยู่ภายในแล้ว Pointer to interface เพิ่มอีกชั้นโดยไม่จำเป็น
+
+## 6. พื้นฐาน Go ที่ใช้บ่อย
+
+### Boilerplate
+
+Boilerplate คือโค้ดที่จำเป็นแต่มีรูปแบบซ้ำ เช่นเปิด query, scan fields และส่ง error เครื่องมืออย่าง sqlc และ mockgen ช่วยสร้างโค้ดส่วนนี้
+
+### `int` กับ `int64`
+
+- `int` เหมาะกับ index, `len()` และ loop
+- `int64` มีขนาด 64 บิตแน่นอน เหมาะกับ ID, balance และ PostgreSQL `BIGINT`
+- Go ไม่แปลง type ให้อัตโนมัติ
 
 ```go
 var count int = 10
-var balance int64 = 100
-
-balance = int64(count) // ต้องแปลง type อย่างชัดเจน
+var balance int64 = int64(count)
 ```
-
-การแปลง `int64` เป็น `int` ต้องระวังค่าสูงเกินช่วงของ `int` โดยเฉพาะบนระบบ 32-bit
 
 ### Pointer
 
-Pointer คือตัวแปรที่เก็บที่อยู่ของตัวแปรอีกตัว:
+Pointer เก็บที่อยู่ของค่าอื่น:
 
 ```go
 x := 10
-p := &x  // p มี type เป็น *int และเก็บที่อยู่ของ x
-*p = 20 // dereference แล้วแก้ x ผ่าน pointer
+p := &x
+*p = 20 // x กลายเป็น 20
 ```
 
 - `&x` ขอที่อยู่ของ `x`
-- `*int` หมายถึง type ที่เป็น pointer ไปยัง `int`
-- `*p` เข้าถึงค่าที่ `p` ชี้อยู่
-- pointer มีค่าเป็น `nil` ได้ และการ dereference `nil` จะทำให้ panic
+- `*int` คือ type pointer ไปยัง `int`
+- `*p` เข้าถึงค่าที่ pointer ชี้อยู่
+- Dereference `nil` จะ panic
 
-Go ส่ง argument แบบ copy เสมอ การส่ง pointer คือการ copy ที่อยู่ ทำให้ function เข้าถึงและแก้ข้อมูลต้นฉบับได้:
+Constructor คืน pointer เมื่อ object ควรใช้งานเป็น instance เดิม:
 
 ```go
-func increase(n *int) {
-    (*n)++
-}
-
-x := 10
-increase(&x) // x กลายเป็น 11
+func NewQueries(db DBTX) *Queries
 ```
 
-Pointer receiver เช่น `func (q *Queries) ...` เหมาะเมื่อ method ต้องแก้ struct เดิม หลีกเลี่ยงการ copy struct หรือรักษาความสม่ำเสมอของ method set
+ดังนั้น:
 
-### Goroutine และ Concurrency
+```go
+store := NewStore(db) // Go อนุมาน return type ให้
+```
 
-Goroutine คือหน่วยงานขนาดเบาที่ Go runtime จัดการให้ ใช้เริ่ม function ให้ทำงานแบบ concurrent ด้วย keyword `go`:
+### Method Receiver
+
+```go
+func (q *Queries) GetAccount(...) (...)
+```
+
+- `q` คือ receiver variable
+- `*Queries` คือ type เจ้าของ method
+- Pointer receiver ช่วยทำงานกับ object เดิมและไม่ copy struct
+
+### Embedded Field
+
+```go
+type SQLStore struct {
+    *Queries
+}
+```
+
+ทำให้เรียก promoted methods ได้:
+
+```go
+store.GetAccount(ctx, id)
+```
+
+เทียบเท่ากับ:
+
+```go
+store.Queries.GetAccount(ctx, id)
+```
+
+### Goroutine และ Channel
+
+Goroutine ใช้รันงานพร้อมกัน:
 
 ```go
 go doWork()
 ```
 
-หากเรียกแบบปกติ ผู้เรียกจะรอจน function เสร็จ:
+Channel ใช้ส่งข้อมูลหรือประสานงาน:
 
 ```go
-doWork()       // รอ doWork เสร็จ
-doOtherWork()  // แล้วจึงเริ่มงานนี้
-```
-
-เมื่อใส่ `go` ผู้เรียกสามารถทำงานต่อได้ทันที:
-
-```go
-go doWork()    // เริ่ม goroutine ใหม่
-doOtherWork()  // ทำงานต่อโดยไม่รอ doWork
-```
-
-Concurrency หมายถึงหลายงานมีช่วงเวลาการทำงานซ้อนกัน ไม่ได้ยืนยันว่าจะทำพร้อมกันทางกายภาพทุกขณะ ส่วน parallelism หมายถึงหลายงานกำลัง execute พร้อมกันจริงบนหลาย CPU cores โดย Go runtime เป็นผู้ schedule goroutines
-
-#### Goroutines ใน Transaction Test
-
-ตัวอย่างทดสอบการโอนเงินพร้อมกัน:
-
-```go
-for range n {
-    go func() {
-        result, err := store.TransferTx(
-            context.Background(),
-            TransferTxParams{
-                FromAccountID: account1.ID,
-                ToAccountID:   account2.ID,
-                Amount:        amount,
-            },
-        )
-
-        errs <- err
-        results <- result
-    }()
-}
-```
-
-หาก `n = 5` loop จะเริ่ม goroutine ห้าตัว และแต่ละตัวเรียก `TransferTx` ซึ่งเปิด transaction แยกกัน:
-
-```text
-goroutine 1 ──> TransferTx 1 ──> transaction 1
-goroutine 2 ──> TransferTx 2 ──> transaction 2
-goroutine 3 ──> TransferTx 3 ──> transaction 3
-goroutine 4 ──> TransferTx 4 ──> transaction 4
-goroutine 5 ──> TransferTx 5 ──> transaction 5
-```
-
-การสร้าง goroutines มีลำดับ แต่ลำดับเริ่มทำงานและลำดับเสร็จไม่แน่นอน เช่น transaction 2 อาจเสร็จก่อน transaction 1 จึงไม่ควรเขียน test โดยสมมติลำดับผลลัพธ์ เว้นแต่มี synchronization บังคับไว้
-
-ถ้าไม่มี keyword `go` loop จะรอ `TransferTx` แต่ละรอบให้เสร็จก่อนเริ่มรอบถัดไป และกลายเป็นการทดสอบแบบ sequential ซึ่งไม่ช่วยเปิดเผย concurrency bugs ได้ดี
-
-#### Channel ใช้รับผลจาก Goroutine
-
-Channels ใช้สื่อสารและ synchronize ระหว่าง goroutines:
-
-```go
-errs := make(chan error)
-results := make(chan TransferResult)
-```
-
-ส่งค่าเข้า channel:
-
-```go
-errs <- err
+results := make(chan Result)
 results <- result
-```
-
-รับค่าออกจาก channel:
-
-```go
-err := <-errs
 result := <-results
 ```
 
-ใน transaction test goroutines ส่งผลลัพธ์กลับมาให้ test goroutine ตรวจสอบ Channels ไม่ได้ทำให้ transactions กลายเป็น transaction เดียว และไม่ได้รับประกันลำดับที่ goroutines จะเสร็จ
+Concurrent tests ช่วยเปิดเผย race condition และ deadlock ที่ sequential tests อาจไม่พบ
 
-Channel ที่สร้างด้วย `make(chan T)` โดยไม่ระบุขนาดเป็น unbuffered channel การส่งจะรอจนมีผู้รับ และการรับจะรอจนมีผู้ส่ง ส่วน buffered channel อนุญาตให้เก็บค่าได้ตาม capacity ก่อนที่ผู้ส่งต้องรอ:
+### `defer`
 
-```go
-results := make(chan TransferResult, n)
-```
-
-#### ทำไม Concurrent Transactions ต้องควบคุมการแก้ข้อมูล
-
-เมื่อหลาย transactions อ่านและแก้ balance เดียวกันพร้อมกัน อาจเกิด Lost Update:
-
-```text
-Tx 1 อ่าน balance = 100       Tx 2 อ่าน balance = 100
-Tx 1 คำนวณเหลือ 90           Tx 2 คำนวณเหลือ 90
-Tx 1 เขียน 90                 Tx 2 เขียนทับเป็น 90
-```
-
-โอนสองครั้งแต่ยอดถูกหักเพียงครั้งเดียว วิธีป้องกันที่ใช้บ่อยคือ:
-
-- `SELECT ... FOR UPDATE` เพื่อล็อก row จน transaction จบ
-- atomic update เช่น `SET balance = balance + $1` ให้ PostgreSQL ล็อกและคำนวณจากค่าล่าสุด
-- isolation level ที่เหมาะสม พร้อม retry เมื่อฐานข้อมูลคืน serialization failure
-
-Row lock ไม่ได้ทำให้ทุก transaction ในระบบทำทีละตัว แต่บังคับให้ transactions ที่ต้องแก้ row เดียวกันรอคิว ส่วน transactions ที่ใช้คนละ rows ยังทำงาน concurrent ได้
-
-#### ข้อควรระวัง
-
-- ต้องมีวิธีรอหรือรับผลจาก goroutines มิฉะนั้น function หลักอาจจบก่อนงานเสร็จ
-- อย่าอ่านและเขียนตัวแปรร่วมโดยไม่มี synchronization เพราะอาจเกิด data race
-- ใช้ `go test -race ./...` ช่วยตรวจ data races ระหว่าง tests
-- goroutine ที่รอ channel, lock หรือ I/O โดยไม่มีทางจบอาจเกิด goroutine leak
-- ส่ง `context.Context` เพื่อให้ goroutines และ I/O operations ยกเลิกได้เมื่อ request หมดเวลาหรือถูกยกเลิก
-
-สรุป: keyword `go` ทำให้แต่ละ `TransferTx` มีโอกาสทำงานซ้อนกัน จึงใช้ทดสอบความถูกต้องภายใต้ concurrency ส่วน channels นำผลลัพธ์กลับมาตรวจ และฐานข้อมูลต้องใช้ row lock, atomic update หรือ isolation ที่เหมาะสมเพื่อรักษาความถูกต้องของข้อมูล
-
-## 6. Method Receiver เทียบกับ TypeScript
-
-โค้ดที่ `sqlc` สร้างมีลักษณะดังนี้:
+`defer` ทำงานก่อน function ที่ประกาศมันจะจบ ไม่ใช่ตอนจบโปรเจกต์
 
 ```go
-func (q *Queries) CreateAccount(
-    ctx context.Context,
-    arg CreateAccountParams,
-) (Account, error) {
-    // ใช้งาน q.db เพื่อ query ฐานข้อมูล
-}
-```
-
-ส่วน `(q *Queries)` เรียกว่า **method receiver** หมายความว่า `CreateAccount` เป็น method ของชนิด `*Queries`
-
-- `q` คือชื่อตัวแปรที่ใช้อ้างถึง object ภายใน method
-- `*Queries` คือ pointer ไปยังชนิด `Queries` ที่เป็นเจ้าของ method
-- `CreateAccount` คือชื่อ method
-
-เมื่อเรียก:
-
-```go
-testQueries.CreateAccount(ctx, arg)
-```
-
-Go จะนำ `testQueries` มาเป็นค่า `q` ให้อัตโนมัติ ภายใน method จึงเข้าถึง database connection ได้ด้วย `q.db`
-
-### เปรียบเทียบกับ TypeScript
-
-Go:
-
-```go
-type Queries struct {
-    db DBTX
-}
-
-func New(db DBTX) *Queries {
-    return &Queries{db: db}
-}
-
-func (q *Queries) CreateAccount(
-    ctx context.Context,
-    arg CreateAccountParams,
-) (Account, error) {
-    // q.db ทำหน้าที่ query ฐานข้อมูล
-}
-```
-
-TypeScript ที่มีแนวคิดใกล้เคียงกัน:
-
-```ts
-class Queries {
-  constructor(private db: DBTX) {}
-
-  async createAccount(
-    arg: CreateAccountParams
-  ): Promise<Account> {
-    // this.db ทำหน้าที่ query ฐานข้อมูล
-  }
-}
-```
-
-การใช้งาน:
-
-```go
-// Go
-testQueries := New(conn)
-account, err := testQueries.CreateAccount(ctx, arg)
-```
-
-```ts
-// TypeScript
-const testQueries = new Queries(conn);
-const account = await testQueries.createAccount(arg);
-```
-
-สิ่งที่เทียบกันได้:
-
-| Go | TypeScript |
-| --- | --- |
-| `type Queries struct` | `class Queries` |
-| `db DBTX` | `private db: DBTX` |
-| `New(conn)` | `new Queries(conn)` |
-| `(q *Queries)` | `this` ภายใน class |
-| `q.db` | `this.db` |
-| `CreateAccount(...)` | `createAccount(...)` |
-| `(Account, error)` | `Promise<Account>` และ error/exception |
-
-`New` ใน Go เป็น factory function ตามธรรมเนียม ไม่ใช่ constructor พิเศษของภาษาเหมือน `constructor` ใน TypeScript
-
-สรุป: `q` ใน method receiver ทำหน้าที่ใกล้เคียงกับ `this` ใน TypeScript และทำให้ method สามารถเข้าถึงข้อมูลภายใน `Queries` เช่น database connection ได้
-
-## 7. พื้นฐานการรัน Go Tests
-
-รัน test ทั้งหมดใน package `db/sqlc` ด้วยคำสั่ง:
-
-```bash
-go test -timeout 30s ./db/sqlc
-```
-
-- `go test` compile และรัน test
-- `-timeout 30s` หยุดการทดสอบหากใช้เวลารวมเกิน 30 วินาที
-- `./db/sqlc` คือ package ที่ต้องการทดสอบ
-
-เพิ่ม `-v` เพื่อแสดงชื่อและผลของแต่ละ test อย่างละเอียด:
-
-```bash
-go test -v -timeout 30s ./db/sqlc
-```
-
-### การเลือก Test ด้วย `-run`
-
-ตัวเลือก `-run` รับ Regular Expression สำหรับกรองชื่อ test ที่ต้องการรัน
-
-รันเฉพาะ `TestCreateAccount`:
-
-```bash
-go test -timeout 30s ./db/sqlc -run '^TestCreateAccount$'
-```
-
-รันทุก test ที่ชื่อขึ้นต้นด้วย `TestAccount`:
-
-```bash
-go test -timeout 30s ./db/sqlc -run '^TestAccount'
-```
-
-ใน Regular Expression เครื่องหมาย `^` หมายถึงจุดเริ่มต้น และ `$` หมายถึงจุดสิ้นสุด ดังนั้น `^TestCreateAccount$` จะตรงกับชื่อนี้แบบพอดีเท่านั้น
-
-### หน้าที่ของ `TestMain`
-
-`TestMain` เป็น lifecycle hook ของ test ทั้ง package เหมาะสำหรับ setup และ cleanup ทรัพยากรที่ tests ใช้ร่วมกัน เช่น database connection:
-
-```go
-var testQueries *Queries
-
-func TestMain(m *testing.M) {
-    conn, err := sql.Open(dbDriver, dbSource)
+func readFile() error {
+    file, err := os.Open("data.txt")
     if err != nil {
-        log.Fatal("cannot connect to db:", err)
+        return err
     }
+    defer file.Close()
 
-    testQueries = New(conn)
-    os.Exit(m.Run())
+    return nil
 }
 ```
 
-Go จะเรียก `TestMain` อัตโนมัติเมื่อทดสอบ package นี้ จึงไม่ต้องรันด้วย:
+หลาย `defer` ทำงานย้อนลำดับแบบ LIFO และ `os.Exit()`/`log.Fatal()` จะไม่รัน `defer`
 
-```bash
-go test ./db/sqlc -run '^TestMain$'
-```
+## 7. Context
 
-`-run` ใช้กรอง test functions ปกติ แต่ `TestMain` เป็น lifecycle hook ไม่ใช่ test case แม้ `TestMain` จะถูกเรียก แต่ `m.Run()` อาจไม่พบ test case ที่ตรงกับ filter และแสดง `no tests to run`
-
-### `m.Run()` และ `os.Exit()`
-
-```go
-os.Exit(m.Run())
-```
-
-ทำงานเป็นลำดับดังนี้:
-
-1. `m.Run()` รัน test cases ทั้งหมดที่ผ่านตัวกรอง และคืน exit code
-2. `os.Exit(...)` จบ process พร้อมส่ง exit code กลับไปยัง command line หรือ CI
-
-- exit code `0` หมายถึง test ผ่าน
-- exit codeที่ไม่ใช่ `0` หมายถึง test ล้มเหลว
-
-ข้อควรระวังคือ `os.Exit` จบ process ทันที ทำให้ `defer` ไม่ถูกเรียก หากต้อง cleanup ให้ทำก่อน `os.Exit`:
-
-```go
-func TestMain(m *testing.M) {
-    // setup
-    code := m.Run()
-    conn.Close()
-    os.Exit(code)
-}
-```
-
-### ทำไม `testQueries` เรียก `CreateAccount` ได้
-
-`New(conn)` คืนค่า `*Queries` และเก็บ `conn` ไว้ใน field `db`:
-
-```go
-func New(db DBTX) *Queries {
-    return &Queries{db: db}
-}
-```
-
-เมื่อกำหนด:
-
-```go
-testQueries = New(conn)
-```
-
-ตัวแปร `testQueries` จึงมีชนิด `*Queries` และสามารถเรียกทุก method ที่มี receiver เป็น `*Queries` ได้ เช่น:
-
-```go
-func (q *Queries) CreateAccount(...) (...)
-```
-
-```go
-account, err := testQueries.CreateAccount(ctx, arg)
-```
-
-ระหว่างทำงาน `q` คือ `testQueries` และ `q.db` คือ database connection ที่ส่งเข้า `New(conn)`
-
-### ทำไม `New` รับ `*sql.DB` เป็น `DBTX` ได้
-
-`DBTX` เป็น interface ที่ประกาศ database methods ที่ generated queries ต้องใช้ เช่น `ExecContext`, `QueryContext` และ `QueryRowContext` ส่วน `*sql.DB` มี methods เหล่านี้ครบ จึง implement `DBTX` โดยอัตโนมัติตามระบบ implicit interface ของ Go:
-
-```go
-conn, err := sql.Open(dbDriver, dbSource) // conn มีชนิด *sql.DB
-testQueries = New(conn)                  // ส่งเป็น DBTX ได้
-```
-
-ข้อดีคือ `Queries` ไม่ผูกติดกับ `*sql.DB` เพียงชนิดเดียว และสามารถใช้ implementation อื่นที่มี methods ครบ เช่น `*sql.Tx` สำหรับ transaction ได้
-
-### Error: `expected 'package', found 'EOF'`
-
-หากพบ error ลักษณะนี้:
+`context.Context` ใช้ส่ง cancellation, timeout, deadline และ request metadata ผ่าน function หลายชั้น
 
 ```text
-account_test.go:1:1: expected 'package', found 'EOF'
+HTTP Request → Handler → Service → Store → Database
 ```
 
-แปลว่าไฟล์ Go ว่างหรือไม่มีคำประกาศ `package` เพราะ Go ทุกไฟล์ต้องระบุ package อย่างน้อย:
+รับ Context เป็น parameter ตัวแรกและส่งตัวเดิมต่อ:
 
 ```go
-package db
-```
-
-หากยังไม่ได้ใช้งานไฟล์ test นั้น ให้เพิ่ม package declaration หรือเอาไฟล์ว่างออกก่อนรัน tests
-
-## 8. Testify
-
-`testify` เป็นไลบรารีเสริมสำหรับเขียน assertions ให้สั้นและอ่านง่ายขึ้น แต่ไม่จำเป็นต้องใช้ เพราะ standard library `testing` ของ Go สามารถใช้เขียน test ได้ครบถ้วนอยู่แล้ว
-
-ติดตั้งด้วยคำสั่ง:
-
-```bash
-go get github.com/stretchr/testify
-```
-
-คำสั่งนี้จะเพิ่ม dependency ลงใน `go.mod` และข้อมูล checksum ลงใน `go.sum` หากใช้เพียง package `require` สามารถระบุ package โดยตรงได้:
-
-```bash
-go get github.com/stretchr/testify/require
-```
-
-Go ไม่มี `devDependencies` แยกเหมือน Node.js ดังนั้น dependency ที่ใช้เฉพาะ test ก็จะอยู่ใน `go.mod` ตามปกติ
-
-### ใช้ `testing` อย่างเดียว
-
-```go
-func TestCreateAccount(t *testing.T) {
-    account, err := testQueries.CreateAccount(ctx, arg)
-
-    if err != nil {
-        t.Fatalf("CreateAccount returned error: %v", err)
-    }
-
-    if account.Owner != arg.Owner {
-        t.Errorf("expected owner %q, got %q", arg.Owner, account.Owner)
-    }
-
-    if account.ID == 0 {
-        t.Error("expected account ID to be generated")
-    }
+func GetAccount(ctx context.Context, id int64) (Account, error) {
+    return store.GetAccount(ctx, id)
 }
 ```
 
-- `t.Error` และ `t.Errorf` ทำให้ test ล้มเหลว แต่ยังทำบรรทัดถัดไป
-- `t.Fatal` และ `t.Fatalf` ทำให้ test ล้มเหลวและหยุด test function ทันที
-
-### ใช้ `testify/require`
+### Context หลัก
 
 ```go
-import "github.com/stretchr/testify/require"
-
-func TestCreateAccount(t *testing.T) {
-    account, err := testQueries.CreateAccount(ctx, arg)
-
-    require.NoError(t, err)
-    require.Equal(t, arg.Owner, account.Owner)
-    require.Equal(t, arg.Balance, account.Balance)
-    require.NotZero(t, account.ID)
-}
+context.Background()               // จุดเริ่มต้น
+context.WithCancel(parent)         // ยกเลิกเองได้
+context.WithTimeout(parent, d)     // หมดอายุหลังระยะเวลา
+context.WithDeadline(parent, time) // หมดอายุตามเวลาที่กำหนด
 ```
 
-หาก assertion ของ `require` ไม่ผ่าน จะหยุด test function ทันที จึงเหมาะกับเงื่อนไขที่ขั้นตอนถัดไปจำเป็นต้องพึ่งพา เช่นต้องตรวจว่าไม่มี error ก่อนตรวจข้อมูลใน `account`
-
-### `require` เทียบกับ `assert`
+เมื่อสร้าง cancellable context ต้องเรียก `cancel()`:
 
 ```go
-require.NoError(t, err)          // ไม่ผ่านแล้วหยุด test ทันที
-assert.Equal(t, expected, value) // ไม่ผ่านแล้วยังตรวจบรรทัดถัดไป
-```
-
-| `require` | `assert` |
-| --- | --- |
-| ไม่ผ่านแล้วหยุด test function | ไม่ผ่านแล้วยังทำบรรทัดถัดไป |
-| ทำงานคล้าย `t.Fatal` / `t.FailNow` | ทำงานคล้าย `t.Error` / `t.Fail` |
-| เหมาะกับเงื่อนไขที่จำเป็นต่อขั้นตอนต่อไป | เหมาะกับการตรวจหลายค่าเพื่อดู failures ทั้งหมด |
-
-`testify` ไม่ได้มาแทนที่ package `testing` แต่ทำงานร่วมกัน เพราะ test function ยังต้องรับ `*testing.T`:
-
-```go
-func TestSomething(t *testing.T) {
-    require.Equal(t, expected, actual)
-}
-```
-
-สรุป: `testing` เพียงอย่างเดียวก็เพียงพอ ส่วน `testify` เป็นเครื่องมือเสริมที่ช่วยลดโค้ด `if` และทำให้ assertions อ่านง่ายขึ้น สำหรับการเรียนรู้ควรเข้าใจ `testing` ก่อน แล้วเลือกใช้ `testify` เมื่อช่วยให้ tests กระชับขึ้น
-
-## 9. `TestMain` และ Test Lifecycle
-
-`TestMain` เป็น entry point พิเศษที่กำหนดโดย package `testing` ของ Go ไม่จำเป็นต้องเรียกจาก `TestCreateAccount` ด้วยตนเอง
-
-เมื่อรัน:
-
-```bash
-go test -timeout 30s ./db/sqlc -run '^TestCreateAccount$'
-```
-
-Go จะรวบรวมไฟล์ที่ลงท้ายด้วย `_test.go` และอยู่ใน package เดียวกัน เช่น:
-
-```text
-db/sqlc/
-├── main_test.go      # มี TestMain
-└── account_test.go   # มี TestCreateAccount
-```
-
-หากทั้งสองไฟล์ประกาศ `package db` Go จะมองว่าเป็น test package เดียวกัน ตัวแปรระดับ package เช่น `testQueries` จึงถูกใช้งานร่วมกันได้
-
-Go test runner จะค้นหาฟังก์ชันที่มีชื่อและ signature ตรงตามรูปแบบนี้:
-
-```go
-func TestMain(m *testing.M)
-```
-
-เมื่อพบ Go จะใช้ฟังก์ชันนี้เป็น entry point ของการทดสอบ package โดยแนวคิดของ test runner ที่ Go สร้างขึ้นมีลักษณะประมาณนี้:
-
-```go
-func main() {
-    m := createTestingM(
-        TestCreateAccount,
-        // test cases อื่น ๆ
-    )
-
-    TestMain(m)
-}
-```
-
-จากนั้น `TestMain` เป็นผู้เรียก `m.Run()` เพื่อเริ่ม test cases:
-
-```go
-func TestMain(m *testing.M) {
-    // setup
-    testQueries = New(conn)
-
-    code := m.Run() // TestCreateAccount เริ่มทำงานจากตรงนี้
-
-    // cleanup
-    conn.Close()
-    os.Exit(code)
-}
-```
-
-ลำดับการทำงานจริงคือ:
-
-```text
-go test
-   │
-   ├── compile package และไฟล์ *_test.go
-   ├── พบและเรียก TestMain(m) อัตโนมัติ
-   ├── ทำ setup เช่นกำหนด testQueries
-   ├── TestMain เรียก m.Run()
-   ├── m.Run() ใช้ -run กรองและรัน TestCreateAccount
-   ├── กลับมาทำ cleanup ใน TestMain
-   └── os.Exit(code) ส่งผลลัพธ์กลับ terminal หรือ CI
-```
-
-ตัวเลือก `-run` กรองเฉพาะ test cases ที่ `m.Run()` จะรัน ไม่ได้กรอง `TestMain` ดังนั้น `TestMain` ยังถูกเรียกเสมอเมื่อ package ประกาศฟังก์ชันนี้
-
-สามารถพิสูจน์ลำดับด้วยการพิมพ์ข้อความ:
-
-```go
-func TestMain(m *testing.M) {
-    fmt.Println("1: before m.Run")
-    code := m.Run()
-    fmt.Println("3: after m.Run")
-    os.Exit(code)
-}
-
-func TestCreateAccount(t *testing.T) {
-    fmt.Println("2: TestCreateAccount")
-}
-```
-
-รันด้วย:
-
-```bash
-go test -v ./db/sqlc -run '^TestCreateAccount$'
-```
-
-จะเห็นผลลัพธ์ตามลำดับประมาณนี้:
-
-```text
-1: before m.Run
-=== RUN   TestCreateAccount
-2: TestCreateAccount
---- PASS: TestCreateAccount
-3: after m.Run
-PASS
-```
-
-ลำดับนี้ไม่ได้ขึ้นอยู่กับชื่อไฟล์หรือตำแหน่งของฟังก์ชัน แต่เกิดจากกฎของ package `testing` ที่กำหนดให้ `TestMain` เป็น entry point พิเศษของการทดสอบทั้ง package
-
-## 10. การสร้างข้อมูลสุ่มสำหรับ Tests
-
-หัวข้อนี้อธิบาย `math/rand` ที่ใช้สร้าง test data เช่น owner, balance และ currency ข้อมูลสุ่มประเภทนี้ไม่เหมาะสำหรับ password, token หรือข้อมูลด้านความปลอดภัย
-
-ชื่อฟังก์ชันที่ใช้ขึ้นอยู่กับ package ที่ import
-
-### `math/rand`
-
-package รุ่นเดิมใช้ `Int63n`:
-
-```go
-import "math/rand"
-
-value := rand.Int63n(10)
-```
-
-Signature ของฟังก์ชันคือ:
-
-```go
-func Int63n(n int64) int64
-```
-
-แม้ชื่อจะเป็น `Int63n` แต่ค่าที่คืนมายังมีชนิดเป็น `int64` สาเหตุที่ใช้ชื่อ 63 เพราะฟังก์ชันคืนค่าเฉพาะจำนวนที่ไม่ติดลบ จึงใช้ 63 บิตสำหรับเก็บค่า ส่วนอีกหนึ่งบิตของ `int64` ปกติใช้ระบุเครื่องหมายบวกหรือลบ
-
-`rand.Int63n(10)` จะสุ่มค่าในช่วง:
-
-```text
-0 <= value < 10
-```
-
-ดังนั้นค่าที่เป็นไปได้คือ `0` ถึง `9` โดยไม่รวม `10`
-
-### `math/rand/v2`
-
-package รุ่นใหม่ใช้ `Int64N` โดยตัว `N` เป็นตัวพิมพ์ใหญ่:
-
-```go
-import "math/rand/v2"
-
-value := rand.Int64N(10)
-```
-
-`Int64N(10)` คืนค่า `int64` ตั้งแต่ `0` ถึง `9` เช่นเดียวกัน แต่ใช้รูปแบบชื่อที่สอดคล้องกับชนิด `int64` มากกว่า
-
-| Package | ฟังก์ชัน | ชนิดค่าที่คืน | ช่วงเมื่อส่ง `10` |
-| --- | --- | --- | --- |
-| `math/rand` | `Int63n(10)` | `int64` | `0` ถึง `9` |
-| `math/rand/v2` | `Int64N(10)` | `int64` | `0` ถึง `9` |
-
-สำหรับโปรเจกต์ใหม่ที่ใช้ Go 1.22 ขึ้นไป แนะนำ `math/rand/v2` ส่วน `math/rand` เหมาะกับการดูแลโค้ดเดิม ทั้งสอง package เป็น pseudo-random และไม่เหมาะกับ password, token หรือ secret ซึ่งควรใช้ `crypto/rand`
-
-`math/rand/v2` ไม่มี `Intn()` แบบ package เดิม แต่ใช้ `IntN()` โดย `N` เป็นตัวพิมพ์ใหญ่:
-
-```go
-index := rand.IntN(10)     // รับและคืนค่า int
-amount := rand.Int64N(10) // รับและคืนค่า int64
-```
-
-- `IntN` เหมาะกับ index และค่าจาก `len()` ซึ่งเป็น `int`
-- `Int64N` เหมาะกับ ID, balance หรือ PostgreSQL `BIGINT` ซึ่งเป็น `int64`
-- ทั้งคู่สุ่มในช่วง `[0, n)` และ panic เมื่อ `n <= 0`
-
-### การสุ่มค่าตั้งแต่ `min` ถึง `max`
-
-สำหรับ `math/rand`:
-
-```go
-func RandomInt(min, max int64) int64 {
-    return min + rand.Int63n(max-min+1)
-}
-```
-
-สำหรับ `math/rand/v2`:
-
-```go
-func RandomInt(min, max int64) int64 {
-    return min + rand.Int64N(max-min+1)
-}
-```
-
-ตัวอย่างเมื่อ `min = 5` และ `max = 10`:
-
-```text
-max - min + 1 = 6
-สุ่มค่า 0 ถึง 5
-บวก min คือ 5
-ผลลัพธ์จึงเป็น 5 ถึง 10
-```
-
-หาก `min = 1` และ `max = 10`:
-
-```text
-max - min + 1 = 10
-rand.Int64N(10) สุ่มได้ 0 ถึง 9
-นำผลที่สุ่มได้ไปบวก min จึงได้ 1 ถึง 10
-```
-
-เลข `10` ที่ส่งเข้า `Int64N` คือจำนวนค่าที่เป็นไปได้ ไม่ใช่ผลลัพธ์ที่จะนำไปบวกกับ `min`
-
-สูตรเดียวกันรองรับช่วงติดลบ เช่น `min = -5`, `max = 5` จะสุ่มได้ตั้งแต่ `-5` ถึง `5` รวมขอบทั้งสองด้าน หากต้องการค่าติดลบเสมอตั้งแต่ `-1` ถึง `-10` ใช้:
-
-```go
-n := -(rand.IntN(10) + 1)
-```
-
-ต้องมี `+1` เพราะ `Int63n` และ `Int64N` ไม่รวมขอบบน หากไม่มี `+1` จะสุ่มได้เพียง `5` ถึง `9`
-
-ข้อควรระวังคือ `max` ต้องไม่น้อยกว่า `min` เพราะ argument ที่ส่งให้ฟังก์ชันสุ่มต้องมากกว่า `0` ไม่เช่นนั้นจะเกิด panic
-
-สำหรับโปรเจกต์ที่ใช้ `math/rand` ให้ใช้ `Int63n` ส่วนโปรเจกต์ใหม่ที่เลือกใช้ `math/rand/v2` สามารถใช้ `Int64N` ได้ ทั้งสองฟังก์ชันไม่เหมาะกับข้อมูลด้านความปลอดภัย เช่น password หรือ token ซึ่งควรใช้ `crypto/rand` แทน
-
-## 11. Testing Strategy, HTTP Handler และ Coverage
-
-### Testing Strategy: Unit Test และ Integration Test
-
-Unit test และ integration test ตรวจคนละส่วนของระบบ จึงควรเลือก implementation ให้ตรงกับสิ่งที่ต้องการทดสอบ
-
-#### Unit Test ใช้ Fake หรือ Mock
-
-Unit test ของ service ควรทดสอบ business logic โดยแยกออกจาก PostgreSQL จึง inject fake หรือ mock ที่ implement interface เดียวกับ store จริง:
-
-```go
-fake := &FakeStore{
-    account: Account{ID: 1, Owner: "Tom"},
-}
-
-service := NewAccountService(fake)
-account, err := service.GetAccount(context.Background(), 1)
-```
-
-การทดสอบนี้เหมาะสำหรับตรวจว่า service ส่ง parameter ถูกต้อง จัดการผลลัพธ์หรือ error ถูกต้อง และบังคับ business rules ถูกต้อง โดยไม่ตรวจ SQL หรือการเชื่อมต่อฐานข้อมูล
-
-#### Integration Test ใช้ Database จริง
-
-หากต้องการตรวจว่า SQL, parameter, การ `Scan` และ PostgreSQL ทำงานร่วมกันถูกต้อง ให้เรียก generated query จริงกับ test database:
-
-```go
-func TestGetAccount(t *testing.T) {
-    created := createRandomAccount(t)
-
-    account, err := testQueries.GetAccount(
-        context.Background(),
-        created.ID,
-    )
-
-    require.NoError(t, err)
-    require.Equal(t, created.ID, account.ID)
-    require.Equal(t, created.Owner, account.Owner)
-}
-```
-
-รูปแบบนี้เป็น integration test เพราะทดสอบการทำงานร่วมกันหลายส่วน ต้องเปิด PostgreSQL, apply migrations และจัดการ test data จึงช้ากว่าและพึ่งพา environment มากกว่า unit test
-
-```text
-AccountService ── unit test ด้วย FakeStore
-       │
-       ▼
-AccountStore interface
-       │
-       ▼
-sqlc Queries ─── integration test ด้วย PostgreSQL จริง
-```
-
-ถ้า service แค่ส่งต่อไปยัง store โดยไม่มี business logic unit test อาจให้ประโยชน์ไม่มาก แต่เมื่อมี validation, authorization หรือการแปลง error ควรมี unit tests สำหรับแต่ละกรณี ส่วน database query ควรมี integration test แยกต่างหาก ระบบหนึ่งจึงสามารถและมักควรมีทั้งสองแบบ
-
-### HTTP Handler Unit Testing ด้วย GoMock และ `httptest`
-
-`api/account_test.go` ทดสอบ route `GET /accounts/:id` โดยรัน Gin handler จริง แต่ใช้ `MockStore` แทน PostgreSQL:
-
-```text
-HTTP Request: GET /accounts/123
-              │
-              ▼
-          Gin Router
-              │
-              ▼
-       getAccount handler
-              │
-              ▼
-      MockStore.GetAccount
-              │
-              ▼
-      HTTP Status และ JSON Body
-```
-
-Test นี้ตรวจ validation, error mapping และ response serialization ของ API โดยไม่ตรวจ SQL หรือ database จึงเป็น unit test ของ HTTP layer
-
-#### ข้อมูลทดสอบและ Table-driven Test
-
-เริ่มจากสร้าง account ใน memory โดยไม่ได้บันทึกลงฐานข้อมูล:
-
-```go
-account := randomAccount()
-```
-
-จากนั้นประกาศตารางของกรณีทดสอบ:
-
-```go
-testCases := []struct {
-    name          string
-    accountID     int64
-    buildStubs    func(store *mockdb.MockStore)
-    checkResponse func(t *testing.T, recorder *httptest.ResponseRecorder)
-}{
-    // test cases
-}
-```
-
-- `name` คือชื่อ subtest
-- `accountID` คือ ID ที่นำไปสร้าง URL
-- `buildStubs` กำหนด expectation และค่าที่ MockStore ต้องคืน
-- `checkResponse` ตรวจ HTTP status และ response body
-
-Table-driven test ช่วยใช้ขั้นตอน setup และส่ง request ชุดเดียวกันกับหลายสถานการณ์ แทนการสร้าง test function แยกที่มีโค้ดซ้ำ
-
-#### กรณีที่ทดสอบ
-
-| กรณี | MockStore คืนค่า | เรียก Store | Response ที่คาดหวัง |
-| --- | --- | --- | --- |
-| `OK` | `account, nil` | 1 ครั้ง | `200 OK` และ account JSON |
-| `NotFound` | `db.Account{}, sql.ErrNoRows` | 1 ครั้ง | `404 Not Found` |
-| `InternalError` | `db.Account{}, sql.ErrConnDone` | 1 ครั้ง | `500 Internal Server Error` |
-| `InvalidID` | ไม่ได้คืนค่า | 0 ครั้ง | `400 Bad Request` |
-
-กรณี `InvalidID` ใช้ ID เป็น `0` ซึ่งไม่ผ่าน validation นี้:
-
-```go
-type getAccountRequest struct {
-    ID int64 `uri:"id" binding:"required,min=1"`
-}
-```
-
-Handler จึงต้องตอบ `400` ก่อนเรียก Store และ test ยืนยันด้วย `Times(0)`
-
-#### การกำหนดพฤติกรรมของ MockStore
-
-กรณีสำเร็จกำหนด expectation ดังนี้:
-
-```go
-store.EXPECT().
-    GetAccount(gomock.Any(), gomock.Eq(account.ID)).
-    Times(1).
-    Return(account, nil)
-```
-
-- `EXPECT()` เริ่มบันทึกสิ่งที่คาดจาก mock
-- `GetAccount(...)` คือ method ที่ handler ต้องเรียก
-- `gomock.Any()` ยอมรับ Context ค่าใดก็ได้
-- `gomock.Eq(account.ID)` บังคับให้ ID ตรงกับค่าที่คาด
-- `Times(1)` ต้องถูกเรียกหนึ่งครั้ง
-- `Return(account, nil)` กำหนดค่าที่ mock คืนให้ handler
-
-ถ้า handler ไม่เรียก method, เรียกเกินจำนวนครั้ง หรือส่ง ID ผิด GoMock จะทำให้ test ล้มเหลว
-
-Mock ช่วยกำหนดสถานการณ์ที่ต้องการได้โดยไม่ต้องทำให้ database เกิด error จริง เช่น:
-
-```go
-store.EXPECT().
-    GetAccount(gomock.Any(), account.ID).
-    Return(db.Account{}, sql.ErrNoRows)
-```
-
-#### การรันแต่ละ Subtest
-
-แต่ละ test case ถูกนำไปรันผ่าน `t.Run`:
-
-```go
-for i := range testCases {
-    tc := testCases[i]
-
-    t.Run(tc.name, func(t *testing.T) {
-        ctrl := gomock.NewController(t)
-        defer ctrl.Finish()
-
-        store := mockdb.NewMockStore(ctrl)
-        tc.buildStubs(store)
-
-        server := NewServer(store)
-        recorder := httptest.NewRecorder()
-
-        url := fmt.Sprintf("/accounts/%d", tc.accountID)
-        request, err := http.NewRequest(http.MethodGet, url, nil)
-        require.NoError(t, err)
-
-        server.router.ServeHTTP(recorder, request)
-        tc.checkResponse(t, recorder)
-    })
-}
-```
-
-จะได้ subtests เช่น:
-
-```text
-TestGetAccount/OK
-TestGetAccount/NotFound
-TestGetAccount/InternalError
-TestGetAccount/InvalidID
-```
-
-หน้าที่ของแต่ละส่วน:
-
-1. `gomock.NewController(t)` จัดการ calls และตรวจ expectations ของ mock
-2. `mockdb.NewMockStore(ctrl)` สร้าง Store ปลอมที่ implement `db.Store`
-3. `tc.buildStubs(store)` กำหนดพฤติกรรมของ mock สำหรับกรณีนั้น
-4. `NewServer(store)` inject mock เข้า Server แทน `SQLStore`
-5. `httptest.NewRecorder()` รับ response แทน HTTP client จริง
-6. `http.NewRequest(...)` สร้าง request โดยไม่ต้องเปิด network port
-7. `ServeHTTP(...)` ส่ง request ผ่าน Gin router และ handler จริง
-8. `tc.checkResponse(...)` ตรวจผลลัพธ์
-
-GoMock รุ่นใหม่ลงทะเบียน cleanup กับ `testing.T` ได้เมื่อสร้าง Controller ดังนั้น `defer ctrl.Finish()` อาจไม่จำเป็น แต่ยังใช้ได้และช่วยสื่อจุดสิ้นสุดของการตรวจ expectations
-
-#### `httptest.NewRecorder()` สร้างที่เก็บ Response
-
-```go
-recorder := httptest.NewRecorder()
-```
-
-บรรทัดนี้สร้าง `*httptest.ResponseRecorder` ซึ่ง implement `http.ResponseWriter` เพื่อรับและบันทึก response จาก handler แทน client/network จริง
-
-```text
-Handler เขียน response
-        │
-        ▼
-ResponseRecorder
-├── Code   เก็บ HTTP status
-├── Header เก็บ response headers
-└── Body   เก็บ response body
-```
-
-การสร้าง recorder เพียงอย่างเดียวยังไม่ได้สร้าง request, เปิด server หรือเรียก handler มันเป็นเพียงพื้นที่สำหรับรับผลลัพธ์เมื่อ `ServeHTTP` ทำงาน
-
-ข้อมูลหลักที่อ่านได้:
-
-```go
-recorder.Code                    // เช่น 200, 400, 404, 500
-recorder.Header().Get("Content-Type")
-recorder.Body.String()           // response body
-response := recorder.Result()    // แปลงเป็น *http.Response
-```
-
-#### `http.NewRequest()` สร้าง Request ใน Memory
-
-```go
-request, err := http.NewRequest(
-    http.MethodGet,
-    "/accounts/10",
-    nil,
-)
-```
-
-บรรทัดนี้สร้าง `*http.Request` เท่านั้น ยังไม่ได้ยิง request หรือเรียก handler:
-
-- `http.MethodGet` คือ HTTP method
-- `"/accounts/10"` คือ path ที่ router จะใช้จับคู่
-- `nil` หมายถึง request ไม่มี body
-- `err` อาจเกิดเมื่อ URL ไม่ถูกต้อง
-
-เชิงแนวคิดเป็นการเตรียมข้อมูลนี้ไว้ใน memory:
-
-```http
-GET /accounts/10
-```
-
-ถ้าต้องการยิงผ่าน network จริงต้องใช้ `http.Client.Do(request)` และ URL เต็ม เช่น `http://localhost:8081/accounts/10` แต่ unit test นี้ไม่ใช้ network
-
-#### `router.ServeHTTP()` รัน Router และ Handler
-
-```go
-server.router.ServeHTTP(recorder, request)
-```
-
-บรรทัดนี้เป็นจุดที่ request เริ่มถูกประมวลผล โดยส่ง request เข้า Gin router โดยตรงใน process เดียวกัน:
-
-```text
-request: GET /accounts/10
-          │
-          ▼
-Gin router จับคู่ GET /accounts/:id
-          │
-          ▼
-สร้าง *gin.Context และอ่าน id = 10
-          │
-          ▼
-เรียก server.getAccount(ctx)
-          │
-          ▼
-handler เรียก MockStore.GetAccount(...)
-          │
-          ▼
-handler เขียน status/header/JSON
-          │
-          ▼
-recorder เก็บ response
-```
-
-`ServeHTTP` มีรูปแบบตามมาตรฐาน `http.Handler`:
-
-```go
-ServeHTTP(writer http.ResponseWriter, request *http.Request)
-```
-
-ดังนั้น `recorder` ทำหน้าที่เป็น writer ปลอม ส่วน `request` เป็น input การเรียกนี้ไม่เปิด TCP port และไม่ต้องเรียก `server.Start()`
-
-เปรียบเทียบ:
-
-| รูปแบบ | ใช้ Network | ต้องเปิด Port | เหมาะกับ |
-| --- | --- | --- | --- |
-| `router.ServeHTTP(recorder, request)` | ไม่ใช้ | ไม่ต้อง | Unit test ของ handler/router |
-| `http.Client.Do(request)` | ใช้ | ต้อง | End-to-end หรือ network test |
-
-#### การตรวจ Response และ JSON Body
-
-`httptest.ResponseRecorder` เก็บข้อมูลที่ handler เขียนออกมา:
-
-```go
-recorder.Code   // HTTP status code
-recorder.Body   // response body
-recorder.Header()
-```
-
-กรณี `OK` ตรวจ status และ account ใน body:
-
-```go
-require.Equal(t, http.StatusOK, recorder.Code)
-requireBodyMatchAccount(t, recorder.Body, account)
-```
-
-Helper อ่าน JSON แล้วแปลงกลับเป็น struct:
-
-```go
-func requireBodyMatchAccount(
-    t *testing.T,
-    body *bytes.Buffer,
-    account db.Account,
-) {
-    data, err := io.ReadAll(body)
-    require.NoError(t, err)
-
-    var gotAccount db.Account
-    err = json.Unmarshal(data, &gotAccount)
-    require.NoError(t, err)
-
-    require.Equal(t, account, gotAccount)
-}
-```
-
-การเปรียบเทียบ struct เหมาะกว่าการเปรียบเทียบ JSON string โดยตรง เพราะ whitespace และลำดับการจัดรูปแบบ JSON อาจต่างกันแม้ข้อมูลมีความหมายเดียวกัน
-
-#### ขอบเขตของ Test นี้
-
-```text
-สิ่งที่ทดสอบ                         สิ่งที่ไม่ได้ทดสอบ
-────────────────────────────────────────────────────────
-Gin route และ URI binding           SQL query
-Validation ของ account ID           PostgreSQL connection
-การเรียก Store ด้วย ID ที่ถูกต้อง    sqlc generated code
-การแปลง Store error เป็น HTTP status Transaction และ locking
-JSON response                        Migration
-```
-
-SQL และ PostgreSQL ควรมี integration tests แยกใน package `db/sqlc` ส่วน test นี้เน้นว่า API ใช้ `db.Store` contract อย่างถูกต้อง
-
-หาก package ไม่มีไฟล์ test จะแสดงประมาณนี้:
-
-```text
-? github.com/MumAroi/go-simplebank/somepackage [no test files]
-```
-
-### Test Coverage
-
-หัวข้อนี้อธิบายคำสั่งพื้นฐาน การอ่านรายงาน และแนวทางเพิ่ม coverage อย่างมีคุณภาพ
-
-ใช้คำสั่งต่อไปนี้เพื่อรัน tests ทุก package พร้อมแสดงรายละเอียดและวัด test coverage:
-
-```bash
-go test -v -cover ./...
-```
-
-ความหมายของแต่ละส่วน:
-
-- `go test` compile และรัน tests
-- `-v` หรือ verbose แสดงชื่อและผลของแต่ละ test
-- `-cover` แสดงเปอร์เซ็นต์ของ statements ที่ถูก execute ระหว่างการทดสอบ
-- `./...` เลือก package ในตำแหน่งปัจจุบันและทุก package ในโฟลเดอร์ย่อย
-
-ตัวอย่างผลลัพธ์:
-
-```text
-=== RUN   TestCreateAccount
---- PASS: TestCreateAccount (0.01s)
-PASS
-coverage: 72.5% of statements
-ok   github.com/MumAroi/go-simplebank/db/sqlc
-```
-
-ค่า coverage หมายถึงสัดส่วน statements ที่ tests รันผ่าน ไม่ได้ยืนยันว่าโปรแกรมถูกต้องตามเปอร์เซ็นต์นั้น
-
-`PASS` กับ coverage วัดคนละเรื่อง:
-
-- `PASS` หมายถึง test cases ที่รันไม่มี assertion ล้มเหลวหรือ panic
-- coverage `72.5%` หมายถึง test วิ่งผ่านประมาณ 72.5% ของ statements ที่นำมาวัด
-- methods หรือ branches ที่ไม่มี test เรียกยังลด coverage ได้ แม้ tests ที่มีอยู่จะผ่านทั้งหมด
-
-ดังนั้น coverage สูงไม่ได้รับประกันว่า test ดี เพราะ test อาจเรียก statement โดยไม่ได้ตรวจผลลัพธ์สำคัญ ควรมี assertions ตรวจทั้ง error และค่าที่คืนมา
-
-### ความหมายของ `./...`
-
-`./...` เป็น package pattern ที่คำสั่ง Go เข้าใจ ไม่ใช่ wildcard `*` ของ shell
-
-- `.` หมายถึง package ใน directory ปัจจุบัน
-- `...` หมายถึง package ในตำแหน่งนั้นและโฟลเดอร์ย่อยทั้งหมดแบบ recursive
-
-เปรียบเทียบคำสั่ง:
-
-```bash
-go test .          # ทดสอบเฉพาะ package ใน directory ปัจจุบัน
-go test ./db/sqlc  # ทดสอบเฉพาะ package db/sqlc
-go test ./db/...   # ทดสอบทุก package ที่อยู่ใต้ db
-go test ./...      # ทดสอบทุก package ใน module ปัจจุบัน
-```
-
-รูปแบบ `./...` ใช้กับคำสั่ง Go อื่นได้ด้วย:
-
-```bash
-go build ./...
-go vet ./...
-go list ./...
-```
-
-Go จะเลือกเฉพาะโฟลเดอร์ที่เป็น Go package เช่นโฟลเดอร์ที่มีไฟล์ `.go` ส่วน `db/migration` ที่มีเฉพาะไฟล์ `.sql` จะไม่ถูกนับเป็น Go package
-
-### สร้างรายงาน Coverage
-
-บันทึกข้อมูล coverage ลงไฟล์:
-
-```bash
-go test -coverprofile coverage.out ./...
-```
-
-ดู coverage แยกตาม function:
-
-```bash
-go tool cover -func coverage.out
-```
-
-เปิดรายงานแบบ HTML:
-
-```bash
-go tool cover -html coverage.out
-```
-
-รายงานแบบ function ช่วยระบุว่าฟังก์ชันใดยังมี statements ที่ tests ไม่ได้รันผ่าน:
-
-```text
-account.sql.go:30:  CreateAccount  100.0%
-account.sql.go:82:  ListAccounts   73.3%
-db.go:27:           WithTx         0.0%
-random.go:10:       RandomInt      0.0%
-total:                            60.5%
-```
-
-- `100.0%` หมายถึงทุก statement ในฟังก์ชันนั้นถูกรันผ่าน
-- `0.0%` หมายถึงยังไม่มี test รันผ่านฟังก์ชันนั้น
-- ค่าระหว่างกลาง เช่น `73.3%` หมายถึงทดสอบเส้นทางปกติแล้ว แต่อาจยังไม่ผ่านบาง branch หรือ error path
-- `total` คือ coverage รวมของ packages ที่อยู่ใน profile
-
-ข้อความจาก `go test` เช่น:
-
-```text
-ok   github.com/MumAroi/go-simplebank/db/sqlc  coverage: 83.9% of statements
-```
-
-เป็น coverage ของ package `db/sqlc` เท่านั้น จึงอาจไม่เท่ากับ `total` หาก package อื่น เช่น `util` ยังมี coverage `0%`
-
-### ความหมายของ `covered` และ `not covered`
-
-เมื่อเปิดรายงานด้วย:
-
-```bash
-go tool cover -html coverage.out
-```
-
-รายงานจะแสดงว่า statements ส่วนใดถูก tests รันผ่าน:
-
-- `covered` หมายถึงมี test อย่างน้อยหนึ่งกรณี execute statement นั้น
-- `not covered` หมายถึงยังไม่มี test ใด execute statement นั้น
-- สีเขียวโดยทั่วไปหมายถึง `covered`
-- สีแดงโดยทั่วไปหมายถึง `not covered`
-- สีเทามักเป็นส่วนที่ไม่ใช่ executable statement เช่น comment, type declaration หรือวงเล็บ
-
-ตัวอย่าง:
-
-```go
-func Divide(a, b int) (int, error) {
-    if b == 0 {
-        return 0, errors.New("cannot divide by zero")
-    }
-
-    return a / b, nil
-}
-```
-
-หาก test เรียกเฉพาะ `Divide(10, 2)` บรรทัด `return a / b, nil` จะเป็น `covered` แต่ error path ภายใน `b == 0` จะเป็น `not covered` เพราะยังไม่มี test ส่งค่า `b` เป็น `0`
-
-สามารถเพิ่ม test สำหรับเส้นทางนั้นได้ว่า:
-
-```go
-func TestDivideByZero(t *testing.T) {
-    result, err := Divide(10, 0)
-
-    require.Error(t, err)
-    require.Zero(t, result)
-}
-```
-
-`not covered` ไม่ได้หมายความว่าโค้ดผิด แต่หมายความว่า test suite ปัจจุบันยังไม่ได้ทำให้โปรแกรมเดินผ่านส่วนนั้น อาจเป็นฟังก์ชันที่ยังไม่มี test, อีกฝั่งของ `if`, กรณี `default` ใน `switch`, error path หรือ generated code ที่จำลองข้อผิดพลาดได้ยาก
-
-รายงาน HTML ช่วยหาเป็นรายบรรทัด โดยทั่วไปสีเขียวคือ statement ที่ tests รันผ่าน และสีแดงคือ statement ที่ยังไม่ถูกรัน วิธีนี้เหมาะที่สุดสำหรับค้นหาว่าต้องเพิ่ม test ตรงไหน
-
-### วิธีเพิ่ม Coverage
-
-1. เริ่มจากฟังก์ชันที่เป็น `0%` และเพิ่ม test สำหรับพฤติกรรมหลัก
-2. เพิ่มกรณี input ที่ขอบเขต เช่น ค่าว่าง ค่าต่ำสุด ค่าสูงสุด หรือไม่พบข้อมูล
-3. เพิ่มกรณี error สำหรับ code paths ที่จัดการข้อผิดพลาด
-4. ตรวจค่าที่คืนและ error ด้วย assertions ไม่ใช่เพียงเรียกฟังก์ชันเพื่อเพิ่มตัวเลข
-5. รัน profile ใหม่และตรวจด้วย `go tool cover -func` หรือรายงาน HTML
-
-ตัวอย่าง test สำหรับ utility function:
-
-```go
-func TestRandomInt(t *testing.T) {
-    for range 100 {
-        value := RandomInt(10, 20)
-        require.GreaterOrEqual(t, value, int64(10))
-        require.LessOrEqual(t, value, int64(20))
-    }
-}
-
-func TestRandomString(t *testing.T) {
-    value := RandomString(10)
-    require.Len(t, value, 10)
-    require.NotEmpty(t, value)
-}
-```
-
-บาง error paths ใน generated code เช่น error จาก `rows.Scan()` หรือ `rows.Err()` อาจทดสอบยากด้วยฐานข้อมูลจริงและต้องใช้ mock database การบังคับให้ generated code เป็น `100%` จึงอาจเพิ่มความซับซ้อนโดยไม่ได้เพิ่มความมั่นใจมากนัก
-
-เป้าหมายที่สำคัญกว่า coverage `100%` คือ business logic, กรณีสำคัญ และ error handling ที่มีโอกาสเกิดจริงได้รับการทดสอบ พร้อม assertions ที่ตรวจพฤติกรรมอย่างถูกต้อง
-
-สำหรับ integration tests ที่เชื่อมต่อ PostgreSQL ต้องเปิดฐานข้อมูลและ apply migrations ให้เรียบร้อยก่อนรัน tests ไม่เช่นนั้น test อาจล้มเหลวจากการเชื่อมต่อหรือไม่พบตาราง
-
-## 12. Struct, Interface, Context และ Dependency Injection
-
-แนวคิดทั้งสี่ส่วนนี้มักทำงานร่วมกันใน Go application:
-
-```text
-Context ──> ควบคุมอายุของงาน
-                  │
-                  ▼
-Service ──> Interface ──> Implementation
-  struct       contract       database/mock
-                  ▲
-                  │
-          Dependency Injection
-```
-
-### Struct
-
-`struct` ใช้รวมข้อมูลหลาย field เป็นชนิดข้อมูลใหม่ คล้าย object data หรือ class ที่ไม่มี inheritance ใน TypeScript:
-
-```go
-type Queries struct {
-    db DBTX
-}
-```
-
-`Queries` มี field ชื่อ `db` ชนิด `DBTX` และสามารถมี methods ได้ผ่าน method receiver:
-
-```go
-func (q *Queries) CreateAccount(ctx context.Context, arg CreateAccountParams) (Account, error) {
-    // q คือ Queries object ที่เรียก method
-    // q.db คือ database dependency ภายใน object
-}
-```
-
-สร้าง struct โดยตรงได้ว่า:
-
-```go
-queries := &Queries{db: conn}
-```
-
-หรือสร้างผ่าน factory function:
-
-```go
-func New(db DBTX) *Queries {
-    return &Queries{db: db}
-}
-
-queries := New(conn)
-```
-
-#### สร้าง Struct โดยตรงเทียบกับใช้ `New`
-
-สองรูปแบบนี้ให้ผลลัพธ์พื้นฐานเหมือนกัน คือได้ `*Queries` ที่มี `conn` เก็บอยู่ใน field `db`:
-
-```go
-// สร้างด้วย struct literal โดยตรง
-queries := &Queries{db: conn}
-
-// สร้างผ่าน constructor function
-func New(db DBTX) *Queries {
-    return &Queries{db: db}
-}
-
-queries := New(conn)
-```
-
-การสร้างโดยตรงมีข้อดีคือสั้นและมองเห็นทันทีว่ากำหนด field ใด เหมาะกับ struct ธรรมดาที่ไม่มี validation หรือขั้นตอน setup และใช้งานภายใน package เดียวกัน แต่ผู้เรียกต้องรู้โครงสร้างภายใน และถ้าวิธีสร้างเปลี่ยนก็อาจต้องแก้ทุกจุดที่สร้าง struct
-
-การสร้างผ่าน `New` มีข้อดีดังนี้:
-
-- ซ่อนรายละเอียดภายใน ผู้เรียกไม่ต้องรู้ว่า dependency ถูกเก็บใน field ชื่ออะไร
-- รวม validation, default values และขั้นตอน setup ไว้ในที่เดียว
-- เปลี่ยนโครงสร้างภายในภายหลังได้โดยไม่ต้องแก้โค้ดผู้เรียก
-- package อื่นเรียกใช้ได้ แม้ struct จะมี unexported fields
-
-ข้อเสียคือเพิ่ม function อีกชั้น และอาจดูเกินความจำเป็นสำหรับ struct ข้อมูลธรรมดาที่ไม่มีข้อกำหนดในการสร้าง
-
-ในกรณี `Queries` field `db` ขึ้นต้นด้วยตัวพิมพ์เล็ก จึงเป็น unexported และเข้าถึงได้เฉพาะ package เดียวกัน โค้ดใน package อื่นจึงทำแบบนี้ไม่ได้:
-
-```go
-queries := &db.Queries{db: conn} // compile error: เข้าถึง db ไม่ได้
-```
-
-แต่สามารถใช้ API ที่ `sqlc` เตรียมไว้ได้:
-
-```go
-queries := db.New(conn)
-```
-
-ดังนั้น `Queries` ควรสร้างผ่าน `New` ส่วน struct ที่เป็นข้อมูลธรรมดาและเปิด fields ให้กำหนดโดยตั้งใจ สามารถใช้ struct literal โดยตรงได้
-
-#### Embedded Field
-
-Embedded field คือการใส่ type เข้าไปใน `struct` โดยไม่ตั้งชื่อ field เอง:
-
-```go
-type Store struct {
-    *Queries
-    db *sql.DB
-}
-```
-
-ในตัวอย่างนี้ `*Queries` เป็น embedded field ส่วน `db *sql.DB` เป็น field ปกติที่มีชื่อ `db`
-
-เปรียบเทียบกับ field ปกติ:
-
-```go
-type Store struct {
-    queries *Queries
-}
-
-store.queries.CreateAccount(ctx, arg)
-```
-
-เมื่อใช้ embedded field Go จะใช้ชื่อ type เป็นชื่อ field จึงเข้าถึงได้ว่า:
-
-```go
-store.Queries.CreateAccount(ctx, arg)
-```
-
-และ methods ของ `Queries` จะถูก promote ขึ้นมาให้เรียกผ่าน `Store` โดยตรงได้:
-
-```go
-store.CreateAccount(ctx, arg)
-```
-
-การเรียกสองรูปแบบนี้ทำงานผ่าน `Queries` ตัวเดียวกัน:
-
-```go
-store.Queries.CreateAccount(ctx, arg)
-store.CreateAccount(ctx, arg)
-```
-
-การที่ method ของ embedded type เรียกผ่าน struct ภายนอกได้โดยตรงเรียกว่า **method promotion**
-
-สร้าง `Store` และกำหนด embedded field ได้ว่า:
-
-```go
-func NewStore(db *sql.DB) *Store {
-    return &Store{
-        db:      db,
-        Queries: New(db),
-    }
-}
-```
-
-แม้ประกาศเป็น pointer `*Queries` ชื่อ field ที่ใช้ใน struct literal ยังคงเป็น `Queries`
-
-Embedding เป็น composition หรือความสัมพันธ์แบบ “มี”:
-
-```text
-Store has a Queries
-```
-
-ไม่ใช่ inheritance หรือความสัมพันธ์แบบ “เป็น” ดังนั้น `*Store` ไม่ได้กลายเป็น `*Queries` และไม่สามารถส่ง `store` ให้ฟังก์ชันที่รับ `*Queries` โดยตรง:
-
-```go
-func RunQueries(q *Queries) {}
-
-RunQueries(store)         // compile error
-RunQueries(store.Queries) // ถูกต้อง
-```
-
-หาก `Store` และ embedded `Queries` มี method ชื่อเดียวกัน Go จะเลือก method ของ `Store` ก่อน:
-
-```go
-store.Save()         // เรียก Store.Save
-store.Queries.Save() // เรียก Queries.Save โดยตรง
-```
-
-ข้อควรระวังคือ embedded pointer อาจเป็น `nil`:
-
-```go
-store := &Store{}
-store.CreateAccount(ctx, arg) // อาจ panic เพราะ store.Queries เป็น nil
-```
-
-จึงควรสร้างผ่าน `NewStore(db)` เพื่อกำหนดทั้ง `db` และ embedded `Queries` ให้พร้อมใช้งาน
-
-ในโปรเจกต์นี้ `Store` embed `*Queries` เพื่อเรียก generated query methods ได้โดยตรง และเก็บ `db *sql.DB` แยกไว้เพื่อเริ่ม transaction ด้วย `BeginTx`
-
-### Interface
-
-`interface` กำหนดชุดความสามารถหรือ methods ที่ค่าชนิดหนึ่งต้องมี โดยไม่ได้กำหนด implementation:
-
-```go
-type DBTX interface {
-    ExecContext(context.Context, string, ...interface{}) (sql.Result, error)
-    QueryContext(context.Context, string, ...interface{}) (*sql.Rows, error)
-    QueryRowContext(context.Context, string, ...interface{}) *sql.Row
-}
-```
-
-Go ใช้ implicit interface implementation หากชนิดใดมี methods ครบ ก็ถือว่า implement interface โดยอัตโนมัติ ไม่ต้องเขียน `implements`
-
-คำว่า implement หมายถึงการทำตามข้อกำหนดของ interface ครบทั้งชื่อ method, parameters และ return values ตัวอย่าง:
-
-```go
-type Speaker interface {
-    Speak() string
-}
-
-type Dog struct{}
-
-func (Dog) Speak() string {
-    return "Woof!"
-}
-
-var speaker Speaker = Dog{} // Dog implement Speaker โดยอัตโนมัติ
-```
-
-ถ้า method ขาดหรือ signature ไม่ตรงจะ compile ไม่ผ่าน นี่เรียกว่า implicit เพราะ `Dog` ไม่ต้องประกาศ `implements Speaker` เอง
-
-ตัวอย่าง `*sql.DB` และ `*sql.Tx` มี database methods ครบ จึงส่งเป็น `DBTX` ได้:
-
-```go
-queriesFromDB := New(db) // db เป็น *sql.DB
-queriesFromTx := New(tx) // tx เป็น *sql.Tx
-```
-
-สามารถตรวจสอบตอน compile ได้ว่า type implement interface หรือไม่:
-
-```go
-var _ DBTX = (*sql.DB)(nil)
-var _ DBTX = (*sql.Tx)(nil)
-```
-
-Interface ช่วยให้โค้ดพึ่งพาความสามารถที่ต้องการ แทนการผูกกับ implementation ชนิดเดียว
-
-### Dependency Injection
-
-Dependency คือสิ่งที่ object ต้องใช้เพื่อทำงาน เช่น `Queries` ต้องใช้ database ส่วน Dependency Injection (DI) คือการสร้าง dependency จากภายนอกแล้วส่งเข้ามาให้ object
-
-```go
-conn, err := sql.Open("postgres", databaseURL)
-if err != nil {
-    log.Fatal(err)
-}
-
-queries := New(conn)
-```
-
-ในตัวอย่างนี้:
-
-- `conn` คือ dependency
-- `New(conn)` คือการ inject dependency
-- `Queries` เก็บ dependency ไว้ใน field `db`
-
-```text
-สร้าง conn ภายนอก
-       │
-       ▼
-   New(conn)
-       │
-       ▼
-Queries{db: conn}
-       │
-       ▼
-CreateAccount ใช้ q.db
-```
-
-การ inject dependency ดีกว่าการให้ `Queries` เปิด connection เอง เพราะผู้เรียกสามารถควบคุม configuration, lifecycle และเปลี่ยน implementation สำหรับ tests ได้
-
-ตัวอย่าง service ที่รับ interface:
-
-```go
-type AccountStore interface {
-    GetAccount(ctx context.Context, id int64) (Account, error)
-}
-
-type AccountService struct {
-    store AccountStore
-}
-
-func NewAccountService(store AccountStore) *AccountService {
-    return &AccountService{store: store}
-}
-
-func (s *AccountService) GetAccount(ctx context.Context, id int64) (Account, error) {
-    return s.store.GetAccount(ctx, id)
-}
-```
-
-Interface ถูกใช้งานตรง type ของ field และ parameter คือ `store AccountStore` ส่วนจุดที่เรียก method ผ่าน interface คือ `s.store.GetAccount(ctx, id)` Logic ภายใน store แต่ละตัวไม่จำเป็นต้องเหมือนกัน ขอเพียง method signature ตรงตาม contract ของ `AccountStore`
-
-ตอนใช้งานจริงสามารถ inject PostgreSQL store:
-
-```go
-service := NewAccountService(postgresStore)
-```
-
-ตอน unit test สามารถ inject fake หรือ mock โดยไม่ต้องเปิดฐานข้อมูล:
-
-```go
-type FakeStore struct {
-    account Account
-}
-
-func (f *FakeStore) GetAccount(ctx context.Context, id int64) (Account, error) {
-    return f.account, nil
-}
-
-fake := &FakeStore{account: Account{ID: 1, Owner: "Tom"}}
-service := NewAccountService(fake)
-```
-
-`*FakeStore` อ่านค่าที่เตรียมไว้ใน memory ส่วน PostgreSQL store อ่านจากฐานข้อมูลจริง แม้ logic ภายในต่างกัน ทั้งคู่ใช้เป็น `AccountStore` ได้เพราะมี `GetAccount(context.Context, int64) (Account, error)` ตรงกัน
-
-DI ไม่ได้บังคับว่าต้องใช้ interface แต่ interface ทำให้สลับ implementation และเขียน unit tests ได้ง่ายขึ้น
-
-### Context
-
-`context.Context` ใช้ควบคุมอายุของงานและส่งสัญญาณตามลำดับการเรียกฟังก์ชัน เช่น:
-
-- ยกเลิกงาน
-- กำหนด timeout
-- กำหนด deadline
-- ส่งข้อมูลที่ผูกกับ request เช่น request ID
-
-นิยามแบบสั้นคือ Context เป็นค่าที่ใช้ส่ง deadline, cancellation signal และข้อมูลเฉพาะ request ข้ามขอบเขตของ function หรือ API เพื่อให้งานในแต่ละชั้นหยุดหรือหมดอายุไปพร้อมกับงานต้นทาง
-
-`context.Context` เป็น interface ที่มี methods หลักดังนี้:
-
-```go
-type Context interface {
-    Deadline() (deadline time.Time, ok bool)
-    Done() <-chan struct{}
-    Err() error
-    Value(key any) any
-}
-```
-
-- `Deadline()` บอกเวลาที่งานต้องสิ้นสุด หากมีการกำหนดไว้
-- `Done()` คืน channel ที่ถูกปิดเมื่อ context ถูกยกเลิกหรือหมดเวลา
-- `Err()` บอกสาเหตุ เช่น `context.Canceled` หรือ `context.DeadlineExceeded`
-- `Value()` อ่านข้อมูลเฉพาะ request จาก key
-
-โดยทั่วไปไม่ต้อง implement interface นี้เอง แต่สร้างและต่อยอด context ด้วย functions ใน package `context`
-
-Context มักถูกส่งเป็น parameter ตัวแรก:
-
-```go
-func (s *AccountService) GetAccount(ctx context.Context, id int64) (Account, error) {
-    return s.store.GetAccount(ctx, id)
-}
-```
-
-Context เดียวกันจะถูกส่งต่อผ่านแต่ละชั้น:
-
-```text
-HTTP Request
-    │ r.Context()
-    ▼
-Handler
-    │ ctx
-    ▼
-Service
-    │ ctx
-    ▼
-Store / Database Query
-```
-
-หาก client ยกเลิก HTTP request ตัว `r.Context()` จะถูกยกเลิก และ database driver สามารถหยุดรอ query ที่ใช้ context เดียวกันได้
-
-#### Root Context
-
-ใช้ `context.Background()` เป็น context เริ่มต้นใน `main`, initialization หรือ tests:
-
-```go
-account, err := testQueries.GetAccount(context.Background(), accountID)
-```
-
-`Background` ไม่มี timeout, deadline หรือการยกเลิกอัตโนมัติ ส่วน `context.TODO()` ใช้เป็น placeholder เมื่อยังไม่แน่ใจว่าควรรับ context จากที่ใด
-
-#### Timeout
-
-```go
-ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-defer cancel()
-
-account, err := queries.GetAccount(ctx, accountID)
-```
-
-หาก query ใช้เวลาเกิน 2 วินาที context จะหมดเวลาและคืน error เช่น `context deadline exceeded` ควรเรียก `cancel()` เสมอเพื่อคืนทรัพยากร แม้งานจะเสร็จก่อน timeout
-
-#### Deadline
-
-`WithDeadline` กำหนดเวลาสิ้นสุดแบบเจาะจง ต่างจาก `WithTimeout` ที่กำหนดระยะเวลาสูงสุดนับจากปัจจุบัน:
-
-```go
-deadline := time.Now().Add(2 * time.Second)
-ctx, cancel := context.WithDeadline(context.Background(), deadline)
+ctx, cancel := context.WithTimeout(parent, 2*time.Second)
 defer cancel()
 ```
 
-#### Cancellation
+### `ctx.Done()` แบบง่าย
 
-Context Cancellation คือการส่งสัญญาณให้งานที่กำลังทำอยู่ทราบว่าควรหยุด ไม่ได้บังคับฆ่า function หรือ goroutine ทันที งานหรือ library ที่รับ context ต้องร่วมมือโดยตรวจ `ctx.Done()` หรือรองรับ context ภายใน API ของตนเอง
+ให้นึกว่า `ctx.Done()` คือกริ่งเลิกงาน:
 
-```go
-ctx, cancel := context.WithCancel(context.Background())
-defer cancel()
-
-go doWork(ctx)
-cancel()
+```text
+ยังไม่ cancel → กริ่งยังไม่ดัง → ผู้รอยังรอ
+cancel()      → Done channel ปิด → ผู้รอรู้ว่าควรหยุด
 ```
-
-- `ctx` ถูกส่งต่อไปยังงานที่ต้องการควบคุม
-- `cancel()` ปิด channel ที่คืนจาก `ctx.Done()` เพื่อส่งสัญญาณยกเลิก
-- หลังจากเรียก `cancel()` ค่า `ctx.Err()` จะเป็น `context.Canceled`
-- ควรเรียก `cancel()` เสมอเมื่อสร้าง cancellable context เพื่อคืนทรัพยากร แม้งานจะเสร็จแล้ว
-
-ภายในงานสามารถรอสัญญาณยกเลิกควบคู่กับผลลัพธ์ผ่าน `select`:
 
 ```go
 func waitForResult(ctx context.Context, resultCh <-chan string) (string, error) {
@@ -2803,504 +507,235 @@ func waitForResult(ctx context.Context, resultCh <-chan string) (string, error) 
 }
 ```
 
-หาก function ไม่ตรวจ `ctx.Done()` และไม่ส่ง context ให้ API ที่รองรับ การเรียก `cancel()` จะไม่ทำให้ function นั้นหยุดเอง เช่น `time.Sleep` จะยังรอจนครบเวลา
+การปิด channel แจ้งผู้รอหลาย goroutines พร้อมกันได้ แต่ไม่ได้บังคับฆ่า goroutine งานต้องตรวจ `Done()` หรือเรียก API ที่รองรับ Context
 
-สำหรับ database ไม่ต้องเขียน `select` เอง เพราะใช้ API ที่รองรับ context ได้โดยตรง:
+กฎสำคัญ:
 
-```go
-row := db.QueryRowContext(ctx, query, id)
-```
+- ใช้ Context จาก request เช่น `r.Context()`
+- ใช้ `Background()` ใน `main`, setup หรือ test
+- อย่าส่ง `nil`
+- โดยทั่วไปไม่เก็บ Context ใน struct
+- ใช้ `WithValue` เฉพาะ metadata เช่น request ID ไม่ใช้แทน business parameters
 
-เมื่อ HTTP client ยกเลิก request สัญญาณจาก `r.Context()` สามารถไหลผ่าน handler, service และ store ไปถึง database driver เพื่อให้ driver พยายามหยุด query ที่ไม่จำเป็น
+## 8. Testing
 
-Cancellation ยังส่งจาก parent ลงไปยัง child context:
+### `TestMain`
 
-```go
-parent, cancelParent := context.WithCancel(context.Background())
-child, cancelChild := context.WithTimeout(parent, 5*time.Second)
-
-defer cancelParent()
-defer cancelChild()
-```
-
-- ยกเลิก `parent` จะยกเลิก `child` ด้วย
-- ยกเลิก `child` จะไม่ยกเลิก `parent`
-
-ดังนั้น cancellation เป็นกลไกแบบ cooperative: ผู้ส่งแจ้งว่าควรหยุด ส่วนงานผู้รับต้องฟังสัญญาณและจบการทำงานอย่างเหมาะสม
-
-#### Context Value
-
-`WithValue` เหมาะสำหรับ metadata ที่เดินทางไปกับ request เช่น request ID, trace ID หรือข้อมูล authentication:
+ใช้ setup และ cleanup resource ของ tests ทั้ง package:
 
 ```go
-type contextKey string
-
-const requestIDKey contextKey = "request-id"
-
-ctx := context.WithValue(parent, requestIDKey, "req-123")
-requestID, ok := ctx.Value(requestIDKey).(string)
+func TestMain(m *testing.M) {
+    // เปิด database
+    code := m.Run()
+    // ปิด database
+    os.Exit(code)
+}
 ```
 
-ควรสร้าง key type เฉพาะเพื่อลดโอกาสชนกับ key จาก package อื่น และไม่ควรใช้ Context แทน parameters ของ business logic เช่น `accountID` ควรส่งตรงผ่าน `GetAccount(ctx, accountID)`
-
-##### ตัวอย่าง Transaction Label สำหรับ Debug
-
-Concurrent transaction test สามารถแนบชื่อ transaction ลง context เพื่อแยก log ของแต่ละ goroutine:
-
-```go
-type txKeyType struct{}
-
-var txKey = txKeyType{}
-
-txName := "tx 1"
-ctx := context.WithValue(context.Background(), txKey, txName)
-```
-
-`WithValue(parent, key, value)` สร้าง context ลูกที่เก็บคู่ key/value เชิงแนวคิดดังนี้:
+`m.Run()` รัน tests และคืน exit code:
 
 ```text
-ctx
-└── txKey ──> "tx 1"
+0        → ผ่าน
+ไม่ใช่ 0 → ไม่ผ่าน
 ```
 
-ค่าไม่ได้ถูกเก็บไว้ภายในตัวแปร `txKey`; `txKey` เป็นเพียงกุญแจ ส่วน context เป็นผู้เก็บ `txName` อ่านค่ากลับได้ด้วย key เดิม:
+ต้อง cleanup ก่อน `os.Exit()` เพราะ `os.Exit()` ไม่รัน `defer`
 
-```go
-txName, ok := ctx.Value(txKey).(string)
-if !ok {
-    txName = "unknown transaction"
-}
-```
+### Unit Test กับ Integration Test
 
-ถ้าใช้เพียงกับ `fmt.Println` สามารถรับเป็น `any` ได้โดยตรง:
-
-```go
-txName := ctx.Value(txKey)
-fmt.Println(txName, "create transfer")
-```
-
-ชื่ออย่าง `"tx 1"` เป็น debug label ที่ test สร้างเอง ไม่ใช่ transaction ID จริงของ PostgreSQL และไม่มีผลต่อ `BEGIN`, `COMMIT`, `ROLLBACK`, row locks หรือ isolation level
-
-`context.WithValue` ไม่แก้ parent context เพราะ Context เป็น immutable:
-
-```go
-parent := context.Background()
-ctx := context.WithValue(parent, txKey, "tx 1")
-
-parent.Value(txKey) // nil
-ctx.Value(txKey)    // "tx 1"
-```
-
-ไม่จำเป็นต้องใช้ `struct{}{}` เป็น key แต่ควรใช้ custom unexported type เพื่อหลีกเลี่ยง key collision ไม่แนะนำ string ธรรมดา เช่น `"tx-name"` เพราะ package อื่นอาจใช้ key เดียวกัน
-
-Transaction label เหมาะกับ logging/debug metadata เท่านั้น Business parameters เช่น amount และ account ID ควรส่งผ่าน `TransferTxParams` โดยตรง
-
-#### ทำไมใช้ `context.Context` แทน `*context.Context`
-
-`context.Context` เป็น interface อยู่แล้ว:
-
-```go
-type Context interface {
-    Deadline() (time.Time, bool)
-    Done() <-chan struct{}
-    Err() error
-    Value(key any) any
-}
-```
-
-จึงควรรับแบบนี้:
-
-```go
-func DoSomething(ctx context.Context) error
-```
-
-ไม่ควรรับ pointer ไปยัง interface:
-
-```go
-func DoSomething(ctx *context.Context) error // ไม่แนะนำ
-```
-
-ค่า interface เก็บทั้ง concrete type และ concrete value ไว้ภายใน โดย implementation จริงอาจเป็น pointer อยู่แล้ว เช่นแนวคิดนี้:
-
-```text
-context.Context interface
-    └── *cancelCtx
-```
-
-เมื่อส่ง `ctx` เข้า function Go จะ copy ค่า interface ขนาดเล็ก แต่ยังอ้างถึง context implementation เดิม สัญญาณ cancellation, deadline และ values จึงยังทำงานกับ context tree เดียวกัน ไม่ได้ copy ข้อมูลทั้งหมดแยกออกมา
-
-`*context.Context` เป็น pointer ไปยังกล่อง interface ไม่ใช่ pointer ไปยัง implementation ภายใน ทำให้ caller ต้องส่ง `&ctx` และภายในต้อง dereference โดยแทบไม่มีประโยชน์:
-
-```go
-func DoSomething(ctx *context.Context) {
-    err := (*ctx).Err()
-    _ = err
-}
-```
-
-หลักการเดียวกันใช้กับ interface อื่น เช่น `DBTX`:
-
-```go
-func New(db DBTX) *Queries
-```
-
-ไม่ต้องใช้ `*DBTX` เพราะ interface สามารถเก็บ concrete pointer อย่าง `*sql.DB` หรือ `*sql.Tx` อยู่ภายในได้
-
-สรุป: รับ interface เป็น value ตามปกติ และใช้ pointer กับ concrete struct เมื่อจำเป็น ไม่ควรใช้ pointer to interface เว้นแต่มีกรณีพิเศษที่ต้องเปลี่ยนค่า interface variable ของผู้เรียกโดยตรง
-
-#### แนวทางการใช้ Context
-
-- รับ context เป็น parameter ตัวแรก เช่น `func DoSomething(ctx context.Context, ...)`
-- รับเป็น `context.Context` ไม่ใช่ `*context.Context`
-- ส่ง context เดิมต่อไปยังชั้นล่าง
-- ใน HTTP handler ให้ใช้ `r.Context()` แทนการสร้าง `Background()` ใหม่
-- อย่าส่ง `nil`; หากไม่มี context ให้ใช้ `context.Background()`
-- โดยทั่วไปไม่ควรเก็บ context ไว้ใน struct แต่ให้รับเข้ามาในแต่ละ operation
-- ไม่ควรใช้ context เก็บ database connection, config หรือ optional parameters
-- ใช้ `WithValue` เฉพาะข้อมูลที่ผูกกับ request เช่น request ID หรือ trace ID
-
-### เปรียบเทียบกับ TypeScript
-
-Go:
-
-```go
-type AccountStore interface {
-    GetAccount(ctx context.Context, id int64) (Account, error)
-}
-
-type AccountService struct {
-    store AccountStore
-}
-
-func NewAccountService(store AccountStore) *AccountService {
-    return &AccountService{store: store}
-}
-```
-
-TypeScript:
-
-```ts
-interface AccountStore {
-  getAccount(id: number, signal?: AbortSignal): Promise<Account>;
-}
-
-class AccountService {
-  constructor(private store: AccountStore) {}
-}
-```
-
-| Go | TypeScript |
-| --- | --- |
-| `struct` | `class` หรือ object shape |
-| `interface` | `interface` |
-| `NewAccountService(store)` | `new AccountService(store)` |
-| `q *Queries` | `this` |
-| `context.Context` | ใกล้เคียง `AbortSignal` สำหรับ cancellation |
-| `(value, error)` | `Promise<value>` และ exception/error |
-
-สรุป: `struct` เก็บ state และ dependencies, `interface` กำหนดความสามารถ, Dependency Injection ส่ง implementation เข้ามาจากภายนอก และ `context` ควบคุมอายุของงานที่ไหลผ่านแต่ละชั้นของ application
-
-## 13. GitHub Actions และ CI Workflow
-
-ไฟล์ `.github/workflows/ci.yml` กำหนด Continuous Integration (CI) ของโปรเจกต์ เมื่อเกิด event ที่กำหนด GitHub Actions จะสร้าง runner ชั่วคราวและ PostgreSQL service จากนั้น checkout source code, เตรียม Go, ติดตั้ง migration CLI, apply migrations และรัน tests โดยอัตโนมัติ
-
-```yaml
-name: ci-test
-
-on:
-  push:
-    branches: ["main"]
-  pull_request:
-    branches: ["main"]
-
-jobs:
-  test:
-    name: Test
-    runs-on: ubuntu-latest
-
-    services:
-      postgres:
-        image: postgres:12
-        env:
-          POSTGRES_USER: root
-          POSTGRES_PASSWORD: secret
-          POSTGRES_DB: simple_bank
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v4
-        with:
-          go-version: "1.26"
-
-      - name: Install golang-migrate
-        run: |
-          curl -L https://github.com/golang-migrate/migrate/releases/download/v4.19.1/migrate.linux-amd64.tar.gz | tar xvz
-          sudo mv migrate /usr/bin/migrate
-          which migrate
-
-      - name: Run migrations
-        run: make migrateup
-
-      - name: Test
-        run: make test
-```
-
-### Workflow ทำงานเมื่อใด
-
-```yaml
-name: ci-test
-```
-
-ตั้งชื่อ workflow ที่แสดงในหน้า Actions และสถานะ checks ของ Pull Request
-
-```yaml
-on:
-  push:
-    branches: ["main"]
-  pull_request:
-    branches: ["main"]
-```
-
-กำหนด triggers สองกรณี:
-
-- `push` รันเมื่อมี commit ถูก push เข้า branch `main`
-- `pull_request` รันเมื่อ Pull Request มี branch ปลายทางเป็น `main` เช่นเปิด PR, push commit ใหม่เข้า PR หรือ reopen PR ตาม activity types เริ่มต้นของ GitHub
-
-การ push เข้า feature branch ที่ยังไม่มี Pull Request targeting `main` จะไม่ทำให้ workflow นี้รัน
-
-### Jobs และ Runner
-
-```yaml
-jobs:
-  test:
-    name: Test
-    runs-on: ubuntu-latest
-```
-
-- `jobs` รวมงานทั้งหมดของ workflow
-- `test` เป็น ID ของ job ที่ใช้ภายใน workflow
-- `name: Test` เป็นชื่อที่แสดงในหน้า GitHub Actions และสถานะ check
-- `runs-on: ubuntu-latest` ให้ GitHub สร้าง Linux runner ชั่วคราวสำหรับ job นี้
-
-แต่ละ job เริ่มจาก environment ใหม่ ไฟล์และโปรแกรมที่เตรียมใน job อื่นจะไม่ถูกแชร์โดยอัตโนมัติ เมื่อ job จบ runner จะถูกทิ้ง
-
-### Steps ทำงานตามลำดับ
-
-Steps ใน job เดียวกันทำงานจากบนลงล่าง หาก step หนึ่งล้มเหลว steps ปกติที่เหลือจะไม่ทำงาน และ job จะมีสถานะ failed
-
-```text
-Checkout source code
-       │
-       ▼
-ติดตั้ง/เลือก Go
-       │
-       ▼
-ติดตั้ง golang-migrate
-       │
-       ▼
-Apply database migrations
-       │
-       ▼
-รัน tests ผ่าน Makefile
-```
-
-#### Checkout Repository
-
-```yaml
-- uses: actions/checkout@v4
-```
-
-`uses` เรียก reusable GitHub Action ในที่นี้ `actions/checkout` ดาวน์โหลด source code ของ commit หรือ Pull Request ที่กำลังตรวจมายัง runner หากไม่มี step นี้ คำสั่ง `go build` จะไม่พบไฟล์โปรเจกต์
-
-รูปแบบ `owner/action@version` แยกได้เป็น:
-
-- `actions` คือเจ้าของ action
-- `checkout` คือชื่อ action
-- `@v4` คือ major version ที่เลือกใช้
-
-#### Set up Go
-
-```yaml
-- name: Set up Go
-  uses: actions/setup-go@v4
-  with:
-    go-version: "1.26"
-```
-
-- `name` เป็นข้อความที่แสดงในหน้า log
-- `actions/setup-go` ดาวน์โหลดหรือเลือก Go toolchain ให้ runner
-- `with` ส่ง inputs ให้ action
-- `go-version: "1.26"` ขอ Go รุ่นล่าสุดที่ตรงกับสาย 1.26
-
-ควรใส่เลขเวอร์ชันในเครื่องหมายคำพูดเพื่อให้ YAML ตีความเป็น string
-
-#### PostgreSQL Service
-
-```yaml
-services:
-  postgres:
-    image: postgres:12
-    env:
-      POSTGRES_USER: root
-      POSTGRES_PASSWORD: secret
-      POSTGRES_DB: simple_bank
-    ports:
-      - 5432:5432
-    options: >-
-      --health-cmd pg_isready
-      --health-interval 10s
-      --health-timeout 5s
-      --health-retries 5
-```
-
-- `services` สร้าง containers ที่ job ต้องใช้
-- `image: postgres:12` ใช้ PostgreSQL image รุ่น 12
-- `env` กำหนด user `root`, password `secret` และสร้าง database `simple_bank`
-- `ports: 5432:5432` map port 5432 ของ runner ไปยัง port 5432 ของ container ทำให้คำสั่งบน runner เชื่อมผ่าน `localhost:5432` ได้
-- `options` กำหนด Docker health check โดย GitHub จะรอให้ service healthy ก่อนเริ่ม steps
-
-`POSTGRES_DB` สร้าง database เปล่าเท่านั้น ยังไม่มี tables จึงต้อง apply migrations ก่อน tests
-
-#### Install golang-migrate
-
-```yaml
-- name: Install golang-migrate
-  run: |
-    curl -L https://github.com/golang-migrate/migrate/releases/download/v4.19.1/migrate.linux-amd64.tar.gz | tar xvz
-    sudo mv migrate /usr/bin/migrate
-    which migrate
-```
-
-- `run: |` รัน shell script หลายบรรทัด
-- `curl -L` ดาวน์โหลด archive ของ `golang-migrate` v4.19.1 สำหรับ Linux AMD64
-- `tar xvz` แตก archive ซึ่งได้ executable ชื่อ `migrate`
-- `sudo mv migrate /usr/bin/migrate` ติดตั้ง executable ไว้ใน `PATH`
-- `which migrate` ยืนยันว่า shell ค้นพบคำสั่ง `migrate`
-
-ควรใช้ `curl -fL` หากต้องการให้ step ล้มเหลวทันทีเมื่อ server คืน HTTP error
-
-#### Run Migrations
-
-```yaml
-- name: Run migrations
-  run: make migrateup
-```
-
-เรียก target `migrateup` ใน `Makefile` เพื่อนำไฟล์ใน `db/migration` ไปสร้าง schema จริงใน PostgreSQL service ขั้นตอนนี้ต้องสำเร็จก่อน integration tests ที่เรียก tables
-
-#### Test
-
-```yaml
-- name: Test
-  run: make test
-```
-
-คำสั่งนี้เรียก target `test` ใน `Makefile` ซึ่งปัจจุบันกำหนดว่า:
-
-```makefile
-test:
-	go test -v -cover ./...
-```
-
-จึง compile และรัน tests ทุก package พร้อม verbose output และรายงาน coverage หาก test ใดล้มเหลว command จะคืน exit code ที่ไม่ใช่ `0` ทำให้ step และ workflow ล้มเหลว
-
-หาก test ใดล้มเหลว command จะคืน exit code ที่ไม่ใช่ `0` ทำให้ step และ workflow ล้มเหลว GitHub จึงสามารถใช้ workflow นี้เป็น required status check ก่อน merge Pull Request ได้
-
-### `uses` เทียบกับ `run`
-
-| รูปแบบ | หน้าที่ | ตัวอย่าง |
+| แบบ | ใช้อะไร | ตรวจอะไร |
 | --- | --- | --- |
-| `uses` | เรียก Action ที่มีผู้อื่นหรือโปรเจกต์เตรียมไว้ | `actions/checkout@v4` |
-| `run` | รัน shell command โดยตรงบน runner | `make test` |
+| Unit Test | Mock/Fake | validation, business logic, HTTP response |
+| Integration Test | PostgreSQL จริง | SQL, schema, scan และ transaction |
 
-### สถานะและข้อสังเกตของ Workflow ปัจจุบัน
+ระบบควรมีทั้งสองแบบเพราะตรวจคนละส่วน
 
-#### Go Version
+### Table-driven Test
 
-Workflow ปัจจุบันขอ Go สาย 1.26:
-
-```yaml
-go-version: "1.26"
-```
-
-ซึ่งสอดคล้องกับ major/minor ของ `go.mod`:
+รวมหลายสถานการณ์ในตารางเดียว:
 
 ```go
-go 1.26.4
+testCases := []struct {
+    name          string
+    buildStubs    func(*mockdb.MockStore)
+    checkResponse func(*httptest.ResponseRecorder)
+}{
+    // OK, NotFound, InternalError, InvalidID
+}
 ```
 
-`go-version: "1.26"` ให้ setup action เลือก patch release ที่ตรงกับสาย 1.26 หากต้องการให้ `go.mod` เป็น source of truth โดยตรง สามารถใช้:
+รันเป็น subtests:
 
-```yaml
-- name: Set up Go
-  uses: actions/setup-go@v4
-  with:
-    go-version-file: go.mod
+```go
+for _, tc := range testCases {
+    t.Run(tc.name, func(t *testing.T) {
+        // setup, execute, verify
+    })
+}
 ```
 
-วิธีนี้ลดโอกาสแก้ Go version ใน `go.mod` แล้วลืมอัปเดต workflow
+## 9. GoMock และ HTTP Handler Test
 
-#### PostgreSQL และ Migrations พร้อมสำหรับ Integration Tests
+สร้าง MockStore จาก `Store` interface:
 
-Tests ใน `db/sqlc` เชื่อมต่อ:
+```bash
+mockgen \
+  -package mockdb \
+  -destination db/mock/store.go \
+  github.com/MumAroi/go-simplebank/db/sqlc \
+  Store
+```
+
+- `-package` กำหนดชื่อ package ในไฟล์ที่สร้าง
+- `-destination` กำหนดไฟล์ปลายทาง
+- import path ชี้ไปยัง package ต้นฉบับ
+- `Store` คือ interface ที่ต้องการ mock
+
+ไฟล์ generated ห้ามแก้เอง หลัง interface เปลี่ยนให้รัน `make mock` ใหม่
+
+### กำหนดพฤติกรรม Mock
+
+```go
+store.EXPECT().
+    GetAccount(gomock.Any(), gomock.Eq(account.ID)).
+    Times(1).
+    Return(account, nil)
+```
+
+ความหมาย:
+
+- คาดว่า `GetAccount` ถูกเรียกหนึ่งครั้ง
+- Context เป็นค่าใดก็ได้
+- ID ต้องตรง
+- คืน `account, nil`
+
+Error cases ใช้ input เดิมแต่กำหนด return ต่างกันเพื่อทดสอบ handler ทีละเงื่อนไข:
 
 ```text
-postgresql://root:secret@localhost:5432/simple_bank?sslmode=disable
+sql.ErrNoRows  → 404 Not Found
+sql.ErrConnDone → 500 Internal Server Error
 ```
 
-Workflow ปัจจุบันเตรียมองค์ประกอบที่จำเป็นแล้ว:
+### `httptest`
 
-1. PostgreSQL service สร้าง database `simple_bank`
-2. Port mapping ทำให้ runner เชื่อมผ่าน `localhost:5432`
-3. Health check รอจน PostgreSQL พร้อม
-4. Step ติดตั้ง `golang-migrate`
-5. `make migrateup` apply schema ก่อน `make test`
+```go
+recorder := httptest.NewRecorder()
+request := httptest.NewRequest(http.MethodGet, "/accounts/1", nil)
 
-ค่ารหัสผ่านแบบ plain text ใน workflow นี้ใช้กับ database ชั่วคราวสำหรับ tests และตรงกับ test configuration เท่านั้น ไม่ควรนำ credentials ของ production มาเขียนในไฟล์ ค่าจริงของ environment ภายนอกควรเก็บใน GitHub Secrets
+server.router.ServeHTTP(recorder, request)
+```
 
-#### จุดที่ปรับปรุงได้
+- `ResponseRecorder` เก็บ status, headers และ body
+- Request และ handler ทำงานใน memory ไม่ต้องเปิด network port
+- Router และ handler เป็นของจริง แต่ Store เป็น mock
 
-- ใช้ `curl -fL` แทน `curl -L` เพื่อให้การดาวน์โหลดล้มเหลวทันทีเมื่อ HTTP response เป็น error
-- ใช้ `go-version-file: go.mod` เพื่อลดการกำหนดเวอร์ชันซ้ำ
-- ระบุ user และ database ใน health check เช่น `pg_isready -U root -d simple_bank` เพื่อให้ตรวจ service เป้าหมายชัดเจนขึ้น
-- สามารถเพิ่ม dependency cache ผ่านความสามารถของ `actions/setup-go` เพื่อลดเวลารันในอนาคต
+ตรวจ response:
 
-### Workflow ที่สมบูรณ์ควรมีลำดับอย่างไร
+```go
+require.Equal(t, http.StatusOK, recorder.Code)
+
+data, err := io.ReadAll(recorder.Body)
+require.NoError(t, err)
+
+var got db.Account
+require.NoError(t, json.Unmarshal(data, &got))
+require.Equal(t, account, got)
+```
+
+`io.ReadAll` ใช้แทน `ioutil.ReadAll` ที่ deprecated แล้ว
+
+## 10. Coverage
+
+```bash
+go test -v -cover ./...
+```
+
+- `PASS` หมายถึง assertions ที่รันไม่ล้มเหลว
+- Coverage คือเปอร์เซ็นต์ statements ที่ tests วิ่งผ่าน
+- Tests ผ่านหมดไม่ได้แปลว่า coverage ต้องเป็น 100%
+- Coverage สูงไม่ได้รับประกันว่า test ตรวจ behavior ได้ดี
+
+สร้างรายงาน:
+
+```bash
+go test -coverprofile=coverage.out ./...
+go tool cover -func=coverage.out
+go tool cover -html=coverage.out
+```
+
+`./...` คือ package ปัจจุบันและ packages ใต้ directory ทั้งหมด เป็น pattern ของ Go tools ไม่ใช่ wildcard ทั่วไปของ shell
+
+## 11. GitHub Actions และ CI
+
+Workflow ปัจจุบันทำงานเมื่อ push หรือเปิด Pull Request เข้า `main`:
 
 ```text
-Trigger: push/PR เข้า main
-             │
-             ▼
-สร้าง Ubuntu runner + PostgreSQL service
-             │
-             ▼
-Checkout repository
-             │
-             ▼
-Setup Go 1.26
-             │
-             ▼
-ติดตั้ง golang-migrate v4.19.1
-             │
-             ▼
+Checkout code
+    ↓
+Setup Go
+    ↓
+เริ่ม PostgreSQL service
+    ↓
+ติดตั้ง migrate
+    ↓
+รัน migrations
+    ↓
+รัน tests
+```
+
+PostgreSQL service เป็น database ชั่วคราวและถูกลบเมื่อ job จบ
+
+ข้อควรรู้:
+
+- `services.postgres.env` ถูกใช้ตอนสร้าง container ก่อน `steps`
+- จึงอ่าน `.env` ที่สร้างใน step ภายหลังโดยตรงไม่ได้
+- ค่า CI ทั่วไปใช้ workflow `env` หรือ GitHub Variables
+- Password จริงใช้ GitHub Secrets
+- การ copy `.env.example` เป็น `.env` ไม่ได้ export environment variables อัตโนมัติ
+
+## 12. คำสั่งที่ใช้บ่อย
+
+```bash
+# Database
+make createdb
+make dropdb
 make migrateup
-             │
-             ▼
+make migratedown
+
+# Generate code
+make sqlc
+make mock
+
+# Tests
 make test
-             │
-      ┌──────┴──────┐
-      ▼             ▼
-   Success        Failure
-   check ผ่าน     check ไม่ผ่าน
+go test ./db/sqlc
+go test ./api
+go test ./... -cover
+
+# Application
+make server
 ```
 
-สรุป: `ci.yml` ปัจจุบันตรวจ source code ที่ push เข้า `main` และ Pull Requests ที่จะเข้า `main` โดยสร้าง PostgreSQL ชั่วคราว เตรียม Go 1.26, ติดตั้ง migration CLI, apply schema และรัน tests ผ่าน Makefile หากขั้นตอนใดคืน exit code ที่ไม่ใช่ `0` job จะล้มเหลวและแสดงเป็น check ที่ไม่ผ่านบน GitHub
+ติดตั้ง tools:
+
+```bash
+go install github.com/sqlc-dev/sqlc/cmd/sqlc@v1.31.1
+go install go.uber.org/mock/mockgen@v0.6.0
+go mod tidy
+```
+
+## สรุปสุดท้าย
+
+```text
+Migration ดูแล schema
+sqlc สร้าง type-safe query code
+Store เป็น contract ระหว่าง API กับ database
+SQLStore ใช้ PostgreSQL จริง
+execTx รวมหลาย queries เป็น transaction
+Context ควบคุมอายุของ request
+MockStore ใช้ใน unit test
+PostgreSQL จริงใช้ใน integration test
+CI รัน migrations และ tests อัตโนมัติ
+```
+
+แก่นของการออกแบบคือให้แต่ละชั้นรับผิดชอบหน้าที่ของตัวเอง และเชื่อมกันผ่าน interface ที่ทดสอบหรือเปลี่ยน implementation ได้ง่าย
