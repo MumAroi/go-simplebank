@@ -565,6 +565,26 @@ return
 
 ## 8. Testing
 
+### `t *testing.T`
+
+`t` คือตัวแทนของ Test ที่กำลังรัน โดย Go testing framework เป็นผู้สร้างและส่งเข้ามา:
+
+```go
+func createRandomUser(t *testing.T) User {
+    require.NoError(t, err)
+    return user
+}
+```
+
+ส่ง `t` เข้า helper เพื่อให้ `require`, `t.Error()` หรือ `t.Fatal()` รายงานและหยุด Test ที่เรียกอยู่ได้
+
+```text
+*testing.T     → ควบคุมและรายงานผล Test
+context.Context → cancellation, timeout และ deadline ของงาน
+```
+
+ดังนั้น `t *testing.T` ไม่ใช่ Context
+
 ### `TestMain`
 
 ใช้ setup และ cleanup resource ของ tests ทั้ง package:
@@ -622,7 +642,7 @@ for _, tc := range testCases {
 
 ## 9. GoMock และ HTTP Handler Test
 
-สร้าง MockStore จาก `Store` interface:
+คำสั่งนี้อ่าน `Store` interface จาก `db/sqlc` แล้วสร้าง `MockStore` สำหรับ Unit Test โดยไม่ต้องต่อ Database จริง:
 
 ```bash
 mockgen \
@@ -635,7 +655,7 @@ mockgen \
 - `-package` กำหนดชื่อ package ในไฟล์ที่สร้าง
 - `-destination` กำหนดไฟล์ปลายทาง
 - import path ชี้ไปยัง package ต้นฉบับ
-- `Store` คือ interface ที่ต้องการ mock
+- `Store` คือ interface ที่ต้องการ mock รวมถึง methods จาก `Querier` ที่ฝังอยู่
 
 ไฟล์ generated ห้ามแก้เอง หลัง interface เปลี่ยนให้รัน `make mock` ใหม่
 
