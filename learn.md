@@ -89,6 +89,38 @@ make migratedown
 - schema ที่ทุก environment ใช้ควรมาจาก migration
 - Constraints เช่น PK, FK และ `CHECK` ควรบังคับในฐานข้อมูลเมื่อทำได้
 
+### `UNIQUE CONSTRAINT` กับ `UNIQUE INDEX`
+
+- `UNIQUE CONSTRAINT` คือกฎของตารางว่าข้อมูลห้ามซ้ำ และ PostgreSQL จะสร้าง Unique Index ให้เอง
+- `UNIQUE INDEX` คือสร้าง Index โดยตรง เหมาะกับเงื่อนไขพิเศษ เช่น `WHERE deleted_at IS NULL` หรือ `LOWER(email)`
+- กรณีทั่วไป เช่น `(owner, currency)` ห้ามซ้ำ ควรใช้ Constraint เพียงอย่างเดียว
+
+```sql
+ALTER TABLE accounts
+ADD CONSTRAINT owner_currency_key UNIQUE (owner, currency);
+```
+
+ไม่ต้องสร้าง Unique Index บน columns ชุดเดิมเพิ่ม เพราะจะซ้ำซ้อนและเพิ่มภาระตอนเขียนข้อมูล
+
+### Constraint แบบง่าย
+
+Constraint คือกฎที่ PostgreSQL ใช้ตรวจความถูกต้องตอน `INSERT` และ `UPDATE` ถ้าข้อมูลผิดกฎจะไม่บันทึก
+
+- `PRIMARY KEY` — รหัสหลัก ต้องไม่ซ้ำและไม่เป็น `NULL`
+- `UNIQUE` — ค่าหรือชุดค่าห้ามซ้ำ
+- `FOREIGN KEY` — ค่าที่อ้างอิงต้องมีอยู่ในอีกตาราง
+- `CHECK` — ค่าต้องผ่านเงื่อนไขที่กำหนด
+- `NOT NULL` — ห้ามไม่มีค่า
+
+การลบ Constraint คือการลบเฉพาะกฎ ไม่ได้ลบตาราง Column หรือข้อมูล:
+
+```sql
+ALTER TABLE accounts
+DROP CONSTRAINT IF EXISTS accounts_owner_fkey;
+```
+
+หลังลบ Foreign Key แล้ว PostgreSQL จะไม่ตรวจว่า `accounts.owner` มีอยู่ใน `users.username` อีกต่อไป
+
 ## 3. Transaction, ACID และ Deadlock
 
 Transaction รวมหลาย SQL operations ให้เป็นงานเดียว:
@@ -508,6 +540,20 @@ func waitForResult(ctx context.Context, resultCh <-chan string) (string, error) 
 ```
 
 การปิด channel แจ้งผู้รอหลาย goroutines พร้อมกันได้ แต่ไม่ได้บังคับฆ่า goroutine งานต้องตรวจ `Done()` หรือเรียก API ที่รองรับ Context
+
+### `ctx.JSON()` ใน Gin
+
+`*gin.Context` เป็นตัวกลางของ HTTP request รอบนั้น เมื่อเรียก:
+
+```go
+ctx.JSON(http.StatusBadRequest, errorResponse(err))
+return
+```
+
+- `ctx.JSON(...)` ใช้ ResponseWriter ภายใน Context เขียน JSON และ status กลับไปยัง client
+- Response ไม่ได้ถูกเก็บแล้วส่งกลับไปพร้อม Context
+- `ctx.JSON(...)` ไม่หยุด function จึงต้องใช้ `return` เมื่อไม่ต้องการให้ handler ทำงานต่อ
+- ผู้รับ Response คือ client ที่ส่ง request เช่น Browser, Frontend หรือ Postman
 
 กฎสำคัญ:
 
