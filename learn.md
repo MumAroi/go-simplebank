@@ -346,6 +346,21 @@ var _ Querier = (*Queries)(nil)
 
 แปลว่าให้ compiler ตรวจว่า `*Queries` implement `Querier` ครบ โดยไม่สร้าง object จริง
 
+#### Interface เก็บ Concrete Type
+
+```go
+maker, err := NewPasetoMaker(key)
+```
+
+แม้ตัวแปร `maker` มี static type เป็น `Maker` แต่ค่าจริงภายในมี dynamic type เป็น `*PasetoMaker` เพราะ constructor คืน `&PasetoMaker{...}` เมื่อเรียก `maker.VerifyToken()` Go จึงเลือก method ของ `PasetoMaker` ให้อัตโนมัติ
+
+```text
+static type  = Maker
+dynamic type = *PasetoMaker
+```
+
+ปกติไม่ต้องตรวจ concrete type เพราะจุดประสงค์ของ interface คือให้ JWTMaker และ PasetoMaker ใช้งานผ่าน methods ชุดเดียวกัน
+
 ### Dependency Injection
 
 `Server` รับ Store จากภายนอก:
@@ -417,6 +432,21 @@ return fmt.Errorf("failed to hash password: %w", err)
 
 `%w` เพิ่มคำอธิบายและยังเก็บ error เดิมไว้ให้ตรวจด้วย `errors.Is` หรือ `errors.As` ได้
 
+#### `errors.New()` กับ `fmt.Errorf()`
+
+- `errors.New("...")` ใช้สร้าง error ที่เป็นข้อความคงที่ เช่น `ErrInvalidToken`
+- `fmt.Errorf("... %d", value)` ใช้เมื่อจำเป็นต้องแทรกค่าลงในข้อความ
+- `fmt.Errorf("...: %w", err)` ใช้เพิ่มคำอธิบายและห่อ error เดิม โดยยังตรวจด้วย `errors.Is` ได้
+
+```go
+var ErrInvalidToken = errors.New("token is invalid")
+
+return fmt.Errorf("secret key must have at least %d characters", minSize)
+return fmt.Errorf("create token: %w", err)
+```
+
+จำง่าย ๆ: ข้อความคงที่ใช้ `errors.New`; มีตัวแปรหรือห่อ error เดิมใช้ `fmt.Errorf`
+
 ### Pointer
 
 Pointer เก็บที่อยู่ของค่าอื่น:
@@ -453,6 +483,30 @@ func (q *Queries) GetAccount(...) (...)
 - `q` คือ receiver variable
 - `*Queries` คือ type เจ้าของ method
 - Pointer receiver ช่วยทำงานกับ object เดิมและไม่ copy struct
+
+#### Value Receiver กับ Pointer Receiver
+
+Value receiver ใช้ type ปกติ เช่น `(a Account)` โดย method จะได้รับสำเนาของ struct การแก้ field ภายใน method จึงไม่กระทบค่าต้นฉบับ:
+
+```go
+func (a Account) Rename(name string) {
+    a.Owner = name // แก้เฉพาะสำเนา
+}
+```
+
+Pointer receiver ใช้ pointer type เช่น `(a *Account)` ทำให้ method เข้าถึงและแก้ struct ตัวเดิมได้:
+
+```go
+func (a *Account) Rename(name string) {
+    a.Owner = name // แก้ Account ตัวจริง
+}
+```
+
+สรุปสั้น ๆ:
+
+- `(a Account)` คือ value receiver เหมาะเมื่อไม่ต้องแก้ค่าต้นฉบับ
+- `(a *Account)` คือ pointer receiver เหมาะเมื่อต้องแก้ค่าต้นฉบับ หรือไม่ต้องการ copy struct
+- Go ช่วยหา address ให้อัตโนมัติ จึงเรียก `account.Rename("Tom")` ได้ แม้ method จะใช้ pointer receiver
 
 ### Embedded Field
 
