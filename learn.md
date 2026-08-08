@@ -666,6 +666,9 @@ context.Context → cancellation, timeout และ deadline ของงาน
 
 ใช้ setup และ cleanup resource ของ tests ทั้ง package:
 
+- `m *testing.M` เป็นตัวควบคุมการรัน tests ทั้งหมดใน package
+- ต่างจาก `t *testing.T` ซึ่งใช้ควบคุมและรายงานผลของ test หนึ่งตัว
+
 ```go
 func TestMain(m *testing.M) {
     // เปิด database

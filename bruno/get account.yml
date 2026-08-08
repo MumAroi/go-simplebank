@@ -5,7 +5,7 @@ info:
 
 http:
   method: GET
-  url: http://localhost:8081/accounts/:id
+  url: http://localhost:3010/accounts/:id
   params:
     - name: id
       value: "1681"

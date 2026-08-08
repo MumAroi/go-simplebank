@@ -5,7 +5,7 @@ info:
 
 http:
   method: POST
-  url: http://localhost:8081/accounts
+  url: http://localhost:3010/accounts
   body:
     type: json
     data: |

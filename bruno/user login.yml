@@ -1,19 +1,17 @@
 info:
-  name: transfers
+  name: user login
   type: http
-  seq: 4
+  seq: 6
 
 http:
   method: POST
-  url: http://localhost:3010/transfers
+  url: http://localhost:3010/users/login
   body:
     type: json
     data: |
       {
-        "from_account_id": 1,
-        "to_account_id": 3,
-        "amount": 10,
-        "currency": "USD"
+        "username": "areyouwanno3",
+        "password": "Pas112233"
       }
   auth: inherit
 
