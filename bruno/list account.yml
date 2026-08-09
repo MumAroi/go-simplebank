@@ -13,7 +13,9 @@ http:
     - name: page_size
       value: "10"
       type: query
-  auth: inherit
+  auth:
+    type: bearer
+    token: v2.local.kzqsG3vqYrrA-gVtH0t7glquGRXGMYx9AOnn5uREy-mnqk1PUfnMocJCcpIwMDPhT6dS_D-ZpPOMoSnwOHc0pz_B_jiSjaGz59CxcZpZOEfxxt_t_Y1w1ssKhf4yHyCEH2zr294Wt_tmRuNM54A7SDWt_3ULYCD9YYUEFDh4oYQS5swu1jsnAJQUFNW2iiV_Wfhg4Fvpp4CB45zC2AzuK94R2kEM4Y1dC2Ws5ijj2-j3PkJRqsqa2FeKMkUg2ZV_anqiQNcjoqEaFOgbFqZl9g.bnVsbA
 
 settings:
   encodeUrl: true
