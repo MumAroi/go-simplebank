@@ -1,0 +1,19 @@
+info:
+  name: gRPC
+  type: grpc
+  seq: 9
+
+grpc:
+  url: http://localhost:3011
+  method: /pb.SimpleBank/CreateUser
+  methodType: unary
+  message:
+    - title: message 1
+      message: |-
+        {
+          "username": "thesis",
+          "full_name": "ceno",
+          "email": "turpis",
+          "password": "cuppedia"
+        }
+  auth: inherit
