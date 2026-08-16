@@ -1,3 +1,5 @@
+DB_URL=postgresql://root:secret@localhost:5432/simple_bank?sslmode=disable
+
 createdb:
 	podman exec -it simplebank-postgres createdb --username=root --owner=root simple_bank
 
@@ -5,16 +7,16 @@ dropdb:
 	podman exec -it simplebank-postgres dropdb simple_bank
 
 migrateup:
-	migrate -path db/migration -database "postgresql://root:secret@localhost:5432/simple_bank?sslmode=disable" up
+	migrate -path db/migration -database "$(DB_URL)" -verbose up
 
 migrateup1:
-	migrate -path db/migration -database "postgresql://root:secret@localhost:5432/simple_bank?sslmode=disable" up 1
+	migrate -path db/migration -database "$(DB_URL)" -verbose up 1
 
 migratedown:
-	migrate -path db/migration -database "postgresql://root:secret@localhost:5432/simple_bank?sslmode=disable" down
+	migrate -path db/migration -database "$(DB_URL)" -verbose down
 
 migratedown1:
-	migrate -path db/migration -database "postgresql://root:secret@localhost:5432/simple_bank?sslmode=disable" down 1
+	migrate -path db/migration -database "$(DB_URL)" -verbose down 1
 
 sqlc:
 	sqlc generate
