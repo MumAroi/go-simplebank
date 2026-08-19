@@ -33,10 +33,12 @@ mock:
 
 proto:
 	nu -c "rm  -f  pb/*.go"
+	nu -c "rm  -f  doc/swagger/*.swagger.json"
 	protoc	--proto_path=proto --go_out=pb --go_opt=paths=source_relative \
 	--go-grpc_out=pb --go-grpc_opt=paths=source_relative \
 	--grpc-gateway_out=pb \
 	--grpc-gateway_opt=paths=source_relative \
+	--openapiv2_out=doc/swagger --openapiv2_opt=allow_merge=true,merge_file_name=simple_bank \
 	$(PROTO_FILES)
 
 .PHONY: createdb dropdb migrateup migratedown sqlc test server mock proto

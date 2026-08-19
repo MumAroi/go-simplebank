@@ -7,7 +7,6 @@ import (
 	"net"
 	"net/http"
 
-	"github.com/MumAroi/go-simplebank/api"
 	db "github.com/MumAroi/go-simplebank/db/sqlc"
 	"github.com/MumAroi/go-simplebank/gapi"
 	"github.com/MumAroi/go-simplebank/pb"
@@ -100,9 +99,19 @@ func runGatewayServer(config util.Config, store db.Store) {
 		log.Fatal("can not register grpc server:", err)
 	}
 
-	// สร้าง HTTP multiplexer หลักและส่งทุก path ให้ gRPC-Gateway จัดการ
+	// สร้าง HTTP multiplexer หลักเพื่อเลือก Handler จาก URL path ที่ request เข้ามา
+	// Multiplexer หรือเรียกสั้น ๆ ว่า Mux คือตัวคัดแยก Request แล้วส่งไปยัง Handler ที่ตรงกับ Request นั้นครับ
 	mux := http.NewServeMux()
+
+	// ใช้ gRPC-Gateway เป็น Handler หลักสำหรับ HTTP API routes เช่น /v1/create_user
 	mux.Handle("/", grpcMux)
+
+	// สร้าง FileServer สำหรับอ่าน static files จาก ./doc/swagger เช่น index.html, CSS และ JavaScript
+	fs := http.FileServer(http.Dir("./doc/swagger"))
+
+	// ให้ requests ที่ขึ้นต้นด้วย /swagger/ ไปยัง FileServer และตัด prefix ก่อนค้นหาไฟล์
+	// ตัวอย่าง /swagger/index.html จะถูกแปลงเป็น /index.html แล้วอ่าน ./doc/swagger/index.html
+	mux.Handle("/swagger/", http.StripPrefix("/swagger/", fs))
 
 	// เปิด TCP listener สำหรับ HTTP/JSON Gateway ตาม address เช่น 0.0.0.0:8080
 	listener, err := net.Listen("tcp", config.HTTPServerAddress)
@@ -116,17 +125,5 @@ func runGatewayServer(config util.Config, store db.Store) {
 	err = http.Serve(listener, mux)
 	if err != nil {
 		log.Fatal("can not serve http gateway server:", err)
-	}
-}
-
-func runGinServer(config util.Config, store db.Store) {
-	server, err := api.NewServer(config, store)
-	if err != nil {
-		log.Fatal("can not create server:", err)
-	}
-
-	err = server.Start(config.HTTPServerAddress)
-	if err != nil {
-		log.Fatal("can not start server:", err)
 	}
 }
