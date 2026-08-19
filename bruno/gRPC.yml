@@ -5,15 +5,13 @@ info:
 
 grpc:
   url: http://localhost:3011
-  method: /pb.SimpleBank/CreateUser
+  method: /pb.SimpleBank/LoginUser
   methodType: unary
   message:
     - title: message 1
       message: |-
         {
-          "username": "thesis",
-          "full_name": "ceno",
-          "email": "turpis",
-          "password": "cuppedia"
+          "username": "error",
+          "password": "desolo"
         }
   auth: inherit
