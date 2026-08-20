@@ -2,7 +2,7 @@
   "swagger": "2.0",
   "info": {
     "title": "SimpleBank API",
-    "version": "1.0",
+    "version": "1.1",
     "contact": {
       "name": "Aroi",
       "url": "https://github.com/grpc-ecosystem/grpc-gateway",
@@ -23,6 +23,8 @@
   "paths": {
     "/v1/create_user": {
       "post": {
+        "summary": "Create a new user",
+        "description": "Create a new user",
         "operationId": "SimpleBank_CreateUser",
         "responses": {
           "200": {
@@ -55,6 +57,8 @@
     },
     "/v1/login_user": {
       "post": {
+        "summary": "Login a user",
+        "description": "Login a user",
         "operationId": "SimpleBank_LoginUser",
         "responses": {
           "200": {

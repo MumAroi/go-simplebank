@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"database/sql"
+	"embed"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
@@ -17,6 +19,9 @@ import (
 	"google.golang.org/grpc/reflection"
 	"google.golang.org/protobuf/encoding/protojson"
 )
+
+//go:embed doc/swagger
+var webFiles embed.FS
 
 func main() {
 
@@ -106,12 +111,17 @@ func runGatewayServer(config util.Config, store db.Store) {
 	// ใช้ gRPC-Gateway เป็น Handler หลักสำหรับ HTTP API routes เช่น /v1/create_user
 	mux.Handle("/", grpcMux)
 
+	staticFiles, err := fs.Sub(webFiles, "doc/swagger")
+	if err != nil {
+		log.Fatal("can not create static files:", err)
+	}
+
 	// สร้าง FileServer สำหรับอ่าน static files จาก ./doc/swagger เช่น index.html, CSS และ JavaScript
-	fs := http.FileServer(http.Dir("./doc/swagger"))
+	// fs := http.FileServer(http.Dir("./doc/swagger"))
 
 	// ให้ requests ที่ขึ้นต้นด้วย /swagger/ ไปยัง FileServer และตัด prefix ก่อนค้นหาไฟล์
 	// ตัวอย่าง /swagger/index.html จะถูกแปลงเป็น /index.html แล้วอ่าน ./doc/swagger/index.html
-	mux.Handle("/swagger/", http.StripPrefix("/swagger/", fs))
+	mux.Handle("/swagger/", http.StripPrefix("/swagger/", http.FileServer(http.FS(staticFiles))))
 
 	// เปิด TCP listener สำหรับ HTTP/JSON Gateway ตาม address เช่น 0.0.0.0:8080
 	listener, err := net.Listen("tcp", config.HTTPServerAddress)

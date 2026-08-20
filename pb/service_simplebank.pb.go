@@ -26,14 +26,14 @@ var File_service_simplebank_proto protoreflect.FileDescriptor
 
 const file_service_simplebank_proto_rawDesc = "" +
 	"\n" +
-	"\x18service_simplebank.proto\x12\x02pb\x1a\x1cgoogle/api/annotations.proto\x1a.protoc-gen-openapiv2/options/annotations.proto\x1a\x15rpc_create_user.proto\x1a\x14rpc_login_user.proto2\xba\x01\n" +
+	"\x18service_simplebank.proto\x12\x02pb\x1a\x1cgoogle/api/annotations.proto\x1a.protoc-gen-openapiv2/options/annotations.proto\x1a\x15rpc_create_user.proto\x1a\x14rpc_login_user.proto2\x83\x02\n" +
 	"\n" +
-	"SimpleBank\x12W\n" +
+	"SimpleBank\x12\x80\x01\n" +
 	"\n" +
-	"CreateUser\x12\x15.pb.CreateUserRequest\x1a\x16.pb.CreateUserResponse\"\x1a\x82\xd3\xe4\x93\x02\x14:\x01*\"\x0f/v1/create_user\x12S\n" +
-	"\tLoginUser\x12\x14.pb.LoginUserRequest\x1a\x15.pb.LoginUserResponse\"\x19\x82\xd3\xe4\x93\x02\x13:\x01*\"\x0e/v1/login_userB\x89\x01\x92Aa\x12_\n" +
+	"CreateUser\x12\x15.pb.CreateUserRequest\x1a\x16.pb.CreateUserResponse\"C\x92A&\x12\x11Create a new user\x1a\x11Create a new user\x82\xd3\xe4\x93\x02\x14:\x01*\"\x0f/v1/create_user\x12r\n" +
+	"\tLoginUser\x12\x14.pb.LoginUserRequest\x1a\x15.pb.LoginUserResponse\"8\x92A\x1c\x12\fLogin a user\x1a\fLogin a user\x82\xd3\xe4\x93\x02\x13:\x01*\"\x0e/v1/login_userB\x89\x01\x92Aa\x12_\n" +
 	"\x0eSimpleBank API\"H\n" +
-	"\x04Aroi\x12.https://github.com/grpc-ecosystem/grpc-gateway\x1a\x10none@example.com2\x031.0Z#github.com/MumAroi/go-simplebank/pbb\x06proto3"
+	"\x04Aroi\x12.https://github.com/grpc-ecosystem/grpc-gateway\x1a\x10none@example.com2\x031.1Z#github.com/MumAroi/go-simplebank/pbb\x06proto3"
 
 var file_service_simplebank_proto_goTypes = []any{
 	(*CreateUserRequest)(nil),  // 0: pb.CreateUserRequest
