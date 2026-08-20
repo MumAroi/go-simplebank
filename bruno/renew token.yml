@@ -1,0 +1,21 @@
+info:
+  name: renew token
+  type: http
+  seq: 7
+
+http:
+  method: POST
+  url: http://localhost:3010/tokens/renew_access
+  body:
+    type: json
+    data: |
+      {
+        "refresh_token": "v2.local.j_vfNJjUQ69Nhi-XyG9EbEoiX4ocAIvh1GxhXNxOq5bmFwM-LI-1jbaXdxJTxsHDkN2ILf8bcFL7vrXqLuusvVm1sH1vZfFVKXpjBMqpwdr5x1OrVDiFBlCrr64ZOovHpNQCeocOAQnmwUTwWM5yIF-t410vJ0T8D6Y2fyu0y7_C86ZPOOo8NJI7Qh3ti6_zUOTohwF0o9gVDuf4pY6TJ8rPaUQAdyLGozBdpdQP8sPq3K2MysjHqXbaLE6sBrkJCVCfPOaegxNF4bspFIoN.bnVsbA"
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

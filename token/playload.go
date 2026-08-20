@@ -29,7 +29,7 @@ type VerifiedPayload struct {
 	ID        uuid.UUID
 	Username  string
 	IssuedAt  time.Time
-	ExpiresAt time.Time
+	ExpiredAt time.Time
 }
 
 func NewJWTPayload(username string, duration time.Duration) (*PayloadJWT, error) {

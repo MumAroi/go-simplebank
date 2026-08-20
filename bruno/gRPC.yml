@@ -1,0 +1,17 @@
+info:
+  name: gRPC
+  type: grpc
+  seq: 9
+
+grpc:
+  url: http://localhost:3011
+  method: /pb.SimpleBank/LoginUser
+  methodType: unary
+  message:
+    - title: message 1
+      message: |-
+        {
+          "username": "error",
+          "password": "desolo"
+        }
+  auth: inherit
