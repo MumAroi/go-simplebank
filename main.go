@@ -156,9 +156,10 @@ func runGatewayServer(config util.Config, store db.Store) {
 	}
 
 	log.Printf("start http gateway server at %s", listener.Addr().String())
+	handler := gapi.HttpLogger(mux)
 
 	// เริ่มรับ HTTP requests; Serve จะ block จนกว่า Server จะหยุดหรือเกิด error
-	err = http.Serve(listener, mux)
+	err = http.Serve(listener, handler)
 	if err != nil {
 		log.Fatal().Msg("can not serve http gateway server")
 	}

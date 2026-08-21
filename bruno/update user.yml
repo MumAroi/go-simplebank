@@ -10,12 +10,12 @@ http:
     type: json
     data: |
       {
-        "username": "areyouwanno",
-        "password": "Pas112233",
-        "full_name": "por mas",
-        "email": "are3@mail.com"
+        "username": "areyouwanno1",
+        "password": "Pas1122334"
       }
-  auth: inherit
+  auth:
+    type: bearer
+    token: v2.local.RNxKF0isVEYZjrhmpP1_yxK51QYiwaHOdK4nNg1d07El_Pv5gaOgRZrcQ8OJOyLTTbJ3T11xzgAUGilZbfrvAGnTqcAt0mPw0C-HkVNhUPXMkshVzgaAjI0jBVTvvCdkw92j8ui6-89T2z41R039OERwNWlVXv6bbAcC45V7-OcmiJvR9m5cUPaDfdYPxB4GmqmU1Aq-3LI1SxiF67jeE2F5mACO-4Il-Xgn_NgHIrAF5jVLkDDnETz-4J65JhVVujpZgBhfcDy6iQL-LR0aXw.bnVsbA
 
 settings:
   encodeUrl: true

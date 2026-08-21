@@ -5,13 +5,13 @@ info:
 
 grpc:
   url: http://localhost:3011
-  method: /pb.SimpleBank/UpdateUser
+  method: /pb.SimpleBank/LoginUser
   methodType: unary
   message:
     - title: message 1
       message: |-
         {
-          "username": "error",
-          "password": "desolo"
+          "username": "areyouwanno1",
+          "password": "Pas1122334"
         }
   auth: inherit
