@@ -27,7 +27,6 @@ import (
 var webFiles embed.FS
 
 func main() {
-
 	config, err := util.LoadConfig(".")
 	if err != nil {
 		log.Fatal("can not load config:", err)

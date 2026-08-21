@@ -5,12 +5,12 @@ info:
 
 http:
   method: POST
-  url: http://localhost:3010/users/login
+  url: http://localhost:3010/v1/login_user
   body:
     type: json
     data: |
       {
-        "username": "areyouwanno",
+        "username": "areyouwanno1",
         "password": "Pas112233"
       }
   auth: inherit
@@ -20,3 +20,4 @@ settings:
   timeout: 0
   followRedirects: true
   maxRedirects: 5
+  forwardAuthorizationHeader: true

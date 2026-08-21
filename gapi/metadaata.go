@@ -27,7 +27,7 @@ func (server *Server) extractMetadata(ctx context.Context) (*Metadata, error) {
 		return nil, fmt.Errorf("no metadata in incoming context")
 	}
 
-	if userAgent := md.Get(userAgentHeader); len(userAgentHeader) > 0 {
+	if userAgent := md.Get(userAgentHeader); len(userAgent) > 0 {
 		mtdt.UserAgent = userAgent[0]
 	}
 
