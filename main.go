@@ -5,9 +5,12 @@ import (
 	"database/sql"
 	"embed"
 	"io/fs"
-	"log"
 	"net"
 	"net/http"
+	"os"
+
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 
 	db "github.com/MumAroi/go-simplebank/db/sqlc"
 	"github.com/MumAroi/go-simplebank/gapi"
@@ -27,14 +30,19 @@ import (
 var webFiles embed.FS
 
 func main() {
+
 	config, err := util.LoadConfig(".")
 	if err != nil {
-		log.Fatal("can not load config:", err)
+		log.Fatal().Msg("can not load config")
+	}
+
+	if config.Environment == "development" {
+		log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
 	}
 
 	conn, err := sql.Open(config.DBDriver, config.DBSource)
 	if err != nil {
-		log.Fatal("can not connect to db:", err)
+		log.Fatal().Msg("can not connect to db")
 	}
 
 	runDBMigration(config.MigrationURL, config.DBSource)
@@ -47,24 +55,25 @@ func main() {
 func runDBMigration(migrationURL string, dbSource string) {
 	migration, err := migrate.New(migrationURL, dbSource)
 	if err != nil {
-		log.Fatal("can not create migration:", err)
+		log.Fatal().Msg("can not create migration")
 	}
 
 	if err := migration.Up(); err != nil && err != migrate.ErrNoChange {
-		log.Fatal("can not run migration:", err)
+		log.Fatal().Msg("can not run migration")
 	}
 
-	log.Println("db migrate successfully")
+	log.Info().Msg("db migrate successfully")
 }
 
 func runGrpcServer(config util.Config, store db.Store) {
 	server, err := gapi.NewServer(config, store)
 	if err != nil {
-		log.Fatal("can not create server:", err)
+		log.Fatal().Msg("can not create server")
 	}
 
+	grpcLogger := grpc.UnaryInterceptor(gapi.GrpcLogger)
 	// สร้าง gRPC runtime server ซึ่งทำหน้าที่รับ connection และจัดการ RPC requests
-	grpcServer := grpc.NewServer()
+	grpcServer := grpc.NewServer(grpcLogger)
 
 	// ลงทะเบียน SimpleBank service โดยให้ gRPC ส่งแต่ละ RPC ไปยัง methods ของ gapi.Server
 	pb.RegisterSimpleBankServer(grpcServer, server)
@@ -76,15 +85,15 @@ func runGrpcServer(config util.Config, store db.Store) {
 	// เปิด TCP listener ตาม address ที่กำหนด เช่น 0.0.0.0:3011
 	listener, err := net.Listen("tcp", config.GRPCServerAddress)
 	if err != nil {
-		log.Fatal("can not listen on grpc server:", err)
+		log.Fatal().Msg("can not listen on grpc server")
 	}
 
-	log.Printf("start gRPC server at %s", listener.Addr().String())
+	log.Info().Msgf("start gRPC server at %s", listener.Addr().String())
 
 	// เริ่มรับ requests จาก listener; Serve จะ block อยู่จนกว่า Server จะหยุดหรือเกิด error
 	err = grpcServer.Serve(listener)
 	if err != nil {
-		log.Fatal("can not serve grpc server:", err)
+		log.Fatal().Msg("can not serve grpc server")
 	}
 }
 
@@ -92,7 +101,7 @@ func runGatewayServer(config util.Config, store db.Store) {
 	// สร้าง implementation ของ SimpleBank service ที่มี business logic, Store และ TokenMaker
 	server, err := gapi.NewServer(config, store)
 	if err != nil {
-		log.Fatal("can not create server:", err)
+		log.Fatal().Msg("can not create server")
 	}
 
 	// กำหนดวิธีแปลงระหว่าง HTTP JSON กับ Protobuf messages
@@ -118,7 +127,7 @@ func runGatewayServer(config util.Config, store db.Store) {
 	// รูปแบบ HandlerServer นี้ไม่ต้องเปิด gRPC client connection ไปยัง port ของ gRPC Server
 	err = pb.RegisterSimpleBankHandlerServer(ctx, grpcMux, server)
 	if err != nil {
-		log.Fatal("can not register grpc server:", err)
+		log.Fatal().Msg("can not register grpc server")
 	}
 
 	// สร้าง HTTP multiplexer หลักเพื่อเลือก Handler จาก URL path ที่ request เข้ามา
@@ -130,7 +139,7 @@ func runGatewayServer(config util.Config, store db.Store) {
 
 	staticFiles, err := fs.Sub(webFiles, "doc/swagger")
 	if err != nil {
-		log.Fatal("can not create static files:", err)
+		log.Fatal().Msg("can not create static files")
 	}
 
 	// สร้าง FileServer สำหรับอ่าน static files จาก ./doc/swagger เช่น index.html, CSS และ JavaScript
@@ -143,7 +152,7 @@ func runGatewayServer(config util.Config, store db.Store) {
 	// เปิด TCP listener สำหรับ HTTP/JSON Gateway ตาม address เช่น 0.0.0.0:8080
 	listener, err := net.Listen("tcp", config.HTTPServerAddress)
 	if err != nil {
-		log.Fatal("can not create listener:", err)
+		log.Fatal().Msg("can not create listener")
 	}
 
 	log.Printf("start http gateway server at %s", listener.Addr().String())
@@ -151,6 +160,6 @@ func runGatewayServer(config util.Config, store db.Store) {
 	// เริ่มรับ HTTP requests; Serve จะ block จนกว่า Server จะหยุดหรือเกิด error
 	err = http.Serve(listener, mux)
 	if err != nil {
-		log.Fatal("can not serve http gateway server:", err)
+		log.Fatal().Msg("can not serve http gateway server")
 	}
 }
