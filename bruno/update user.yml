@@ -1,11 +1,11 @@
 info:
-  name: create user
+  name: update user
   type: http
-  seq: 5
+  seq: 9
 
 http:
-  method: POST
-  url: http://localhost:3010/v1/create_user
+  method: PATCH
+  url: http://localhost:3010/v1/update_user
   body:
     type: json
     data: |
@@ -22,3 +22,4 @@ settings:
   timeout: 0
   followRedirects: true
   maxRedirects: 5
+  forwardAuthorizationHeader: true

@@ -5,7 +5,7 @@ info:
 
 grpc:
   url: http://localhost:3011
-  method: /pb.SimpleBank/LoginUser
+  method: /pb.SimpleBank/UpdateUser
   methodType: unary
   message:
     - title: message 1
