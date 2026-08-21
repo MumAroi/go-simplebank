@@ -10,7 +10,7 @@ WORKDIR /app
 COPY --from=builder /app/main .
 COPY --from=builder /app/migrate ./migrate
 COPY .env.example .env
-COPY db/migration ./migration
+COPY db/migration ./db/migration
 COPY start.sh .
 
 EXPOSE 8080
