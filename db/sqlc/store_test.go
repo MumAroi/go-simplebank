@@ -19,7 +19,7 @@ func TestTransferTx(t *testing.T) {
 	amount := int64(10)
 
 	errs := make(chan error)
-	results := make(chan TransferResult)
+	results := make(chan TransferTxResult)
 
 	for range n {
 		go func() {
